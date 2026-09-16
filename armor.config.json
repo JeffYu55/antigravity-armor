@@ -18,7 +18,7 @@
     "port": 50100,
     "upstream": "https://daily-cloudcode-pa.googleapis.com",
     "target": "https://api.deepseek.com/v1/chat/completions",
-    "model": "deepseek-chat",
+    "model": "deepseek-reasoner",
     "keyRef": "DEEPSEEK_API_KEY",
     "probeChars": 900,
     "maxAttempts": 3

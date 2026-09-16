@@ -108,8 +108,21 @@ function divert(action) {
   const port = Number(flags.port || cfg.divert.port)
   const running = netstat(port)
   if (action === 'status' || !action) {
-    console.log('divert :' + port + ' -> ' + (running ? 'LISTENING' : 'down') + '  target=' + cfg.divert.target + ' model=' + cfg.divert.model)
+    // 配置里的模型 ≠ 进程实际在用的模型（切换模型只重启进程不改配置），所以两个都报
+    let liveModel = null
+    try {
+      const ps = execFileSync('powershell', ['-NoProfile', '-Command', "Get-CimInstance Win32_Process -Filter \"Name = 'node.exe'\" | Where-Object { $_.CommandLine -like '*divert run*' } | Select-Object -First 1 -ExpandProperty CommandLine"], { encoding: 'utf8', timeout: 20000 })
+      liveModel = (ps.match(/--model=(\S+)/) || [])[1] || null
+    } catch {}
     const lp = join(cfg.logDir, 'divert.log')
+    let lastModel = null
+    if (existsSync(lp)) {
+      const ms = [...readText(lp).matchAll(/model=([\w.-]+)/g)]
+      lastModel = ms.length ? ms[ms.length - 1][1] : null
+    }
+    console.log('divert :' + port + ' -> ' + (running ? 'LISTENING' : 'down') + '  target=' + cfg.divert.target)
+    console.log('  config model : ' + cfg.divert.model)
+    console.log('  live   model : ' + (liveModel || '(未运行)') + (lastModel && lastModel !== liveModel ? '   [最近日志用的: ' + lastModel + ']' : ''))
     if (existsSync(lp)) console.log('recent:\n' + readText(lp).split('\n').slice(-8).join('\n'))
     return
   }
@@ -140,7 +153,8 @@ async function runDivert(port) {
 async function ls(action) {
   if (action === 'start') {
     const { launchLS, readLsPorts } = await import('./driver/ls.mjs')
-    const { proc, pid, logFile, args } = launchLS(cfg, { port: Number(flags.port || 50095), csrf: flags.csrf || 'aarmor' })
+    // --backend= 可指定模型后端：默认走本地改道代理；传官方地址即为"对照组"（未经装甲的原生通道）
+    const { proc, pid, logFile, args } = launchLS(cfg, { port: Number(flags.port || 50095), csrf: flags.csrf || 'aarmor', backend: flags.backend || null })
     const ports = await readLsPorts(logFile)
     console.log(JSON.stringify({ pid, ports, args }, null, 2))
     if (ports) console.log('\n用这个驱动:\n  $env:ANTIGRAVITY_LS_ADDRESS=\'localhost:' + ports.http + '\'\n  $env:ANTIGRAVITY_CSRF_TOKEN=\'' + (flags.csrf || 'aarmor') + '\'')
