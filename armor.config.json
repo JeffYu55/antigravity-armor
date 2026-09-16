@@ -1,0 +1,48 @@
+{
+  "paths": {
+    "antigravityRoot": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\antigravity",
+    "geminiHome": "C:\\Users\\Administrator\\.gemini",
+    "dshHome": "C:\\Users\\Administrator\\.dsh"
+  },
+  "binary": {
+    "relative": "resources/bin/language_server.exe",
+    "maxLine": 1400,
+    "marker": "**[ARMOR v3]"
+  },
+  "ide": {
+    "relative": "resources/app.asar",
+    "endpointFind": "https://daily-cloudcode-pa.googleapis.com",
+    "endpointBase": "http://127.0.0.1:50100"
+  },
+  "divert": {
+    "port": 50100,
+    "upstream": "https://daily-cloudcode-pa.googleapis.com",
+    "target": "https://api.deepseek.com/v1/chat/completions",
+    "model": "deepseek-chat",
+    "keyRef": "DEEPSEEK_API_KEY",
+    "probeChars": 900,
+    "maxAttempts": 3
+  },
+  "hooks": {
+    "globalRoots": [
+      "~/.gemini/config",
+      "~/.gemini",
+      "~/.agents",
+      "~/.gemini/antigravity",
+      "~/.gemini/antigravity-ide",
+      "~/.gemini/antigravity-cli"
+    ],
+    "workspaces": []
+  },
+  "rules": {
+    "globalFiles": [
+      "~/.gemini/config/AGENTS.md",
+      "~/.gemini/Gemini.md"
+    ],
+    "skillFile": "~/.gemini/config/skills/infinite-gen-3-armor/SKILL.md",
+    "workspaceRule": ".agents/rules/00-armor.md",
+    "markers": {
+      "geminiMd": "<!-- infinite-gen-3-armor v0.5.0 -->"
+    }
+  }
+}
