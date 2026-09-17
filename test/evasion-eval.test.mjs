@@ -4,6 +4,12 @@
 //   1) 从 C:\Users\Administrator\Projects\evasion-eval 迁进来的原夹具逐字节完好；
 //   2) spec 能把同一套夹具（含 ADS 与伪造时间戳）在任意目录重建出来；
 //   3) 加固视角的检测不依赖 CANARY 字符串 —— 抹掉 canary 仍然 6/6。
+//
+// v1.7.4 修正（这条用例曾经只在"生成过夹具的那台机器"上通过）：
+//   git **存不了 NTFS 备用数据流（ADS）**，也存不了伪造时间戳。所以
+//   「仓库里的夹具 == spec 重建结果」这个断言必须在**克隆出来的目录**里也成立 ——
+//   做法是把差异按「能否随 git 传输」分类，而不是把差异整体放过：
+//   可传输部分的任何差异都是真回归，不可传输的那几项则要求逐一核对是预期的那一条。
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -35,7 +41,27 @@ export function testLegacyFixtureMigratedIntact() {
 
 export function testSpecReproducesLegacyFixtureByteForByte() {
   const r = compareDirs(LEGACY, fixture())
-  assert.equal(r.same, true, 'spec 重建结果与原夹具不一致: ' + JSON.stringify(r.diffs.slice(0, 5)))
+  // git 无法携带的东西：NTFS 备用数据流（ADS）。时间戳由 verify() 单独判，不进逐字节比。
+  const UNTRANSPORTABLE = new Set(['streams-differ', 'stream-bytes-differ'])
+  const untransportable = r.diffs.filter((d) => UNTRANSPORTABLE.has(d.kind))
+  const real = r.diffs.filter((d) => !UNTRANSPORTABLE.has(d.kind))
+  // 1) 能随 git 传输的部分：任何差异都是真回归（在克隆出来的目录里同样必须为 0）
+  assert.equal(real.length, 0, 'spec 重建结果与仓库夹具存在**可随 git 传输**的差异（真回归）: ' + JSON.stringify(real.slice(0, 5)))
+  // 2) 被豁免的必须是**预期的那一条**：只有 naive-victim/notes.txt 带 ADS，流名 creds。
+  //    放宽成"忽略一切流差异"会让真正的夹具损坏静默通过 —— 所以逐条核对。
+  for (const d of untransportable) {
+    assert.equal(d.sub, 'naive-victim', 'ADS 差异只应出现在 naive-victim：' + JSON.stringify(d))
+    assert.equal(d.name, 'notes.txt', '只有 notes.txt 带 ADS，别的文件出现流差异就是真回归：' + JSON.stringify(d))
+    assert.ok(JSON.stringify(d.b).includes('creds'), '被豁免的流差异必须是 creds 这一条：' + JSON.stringify(d))
+  }
+  // 3) ADS 能力本身不能因为"git 存不了"就没人管 —— 在重建出来的沙箱里必须真的存在且内容正确
+  //    （testMaterializedFixtureSelfCheck 会断言 adsPresent + adsBody；这里再点名一次，
+  //      保证即使哪天那条用例被改，ADS 覆盖也不会静默消失）
+  const v = verify(fixture())
+  const ads = v.items.find((i) => i.id && String(i.id).includes('ads')) || v.items.find((i) => i.checks && 'adsPresent' in i.checks)
+  assert.ok(ads, '重建沙箱里必须有带 ADS 的条目')
+  assert.equal(ads.checks.adsPresent, true, 'ADS 必须真的落盘：' + JSON.stringify(ads.checks))
+  assert.equal(ads.checks.adsBody, true, 'ADS 内容必须正确：' + JSON.stringify(ads.checks))
 }
 
 export function testMaterializedFixtureSelfCheck() {

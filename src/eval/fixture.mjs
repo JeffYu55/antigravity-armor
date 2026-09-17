@@ -2,6 +2,13 @@
 //
 // 夹具里有三样东西没法随 git 传输：怪名字（零宽/RLO/同形字）、ADS 备用数据流、伪造时间戳。
 // 所以「可复现」的做法是：spec 声明 → materialize() 重建 → verify() 逐项自检。
+//
+// ⚠ 关于「逐字节比对」（v1.7.4 修正）：怪名字与伪造时间戳**其实能**随 git 走（字节层面），
+//   真正过不去 git 的只有 **NTFS 备用数据流（ADS）** —— 克隆出来的目录里，带 ADS 的文件
+//   只有主数据流。所以和仓库目录比对时必须把差异**按能否随 git 传输分类**：
+//   可传输部分的任何差异都是真回归；不可传输的流差异要逐条核对是预期的那一条
+//   （见 test/evasion-eval.test.mjs:testSpecReproducesLegacyFixtureByteForByte）。
+//   ADS 的能力覆盖由 materialize()→verify() 的 adsPresent / adsBody 两项承担。
 import { mkdirSync, writeFileSync, readFileSync, existsSync, utimesSync, statSync, readdirSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { DIRS, FILLERS, TRICKS, HONEYPOTS, groundTruthMd, overviewMd, SPEC_VERSION } from './spec.mjs'

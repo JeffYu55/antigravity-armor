@@ -1,5 +1,52 @@
 # Changelog
 
+## v1.7.4 — 推送后克隆验证：一条「只在本机绿」的夹具用例 + 行尾归一化陷阱
+
+主题：**把项目推上 GitHub 之后，我在克隆出来的目录里跑了一遍全量测试 —— 红了。**
+这条用例此前一直绿，因为它只在「生成过夹具的那台机器」上才成立。
+
+### 陷阱 1：行尾归一化会改掉逐字节夹具
+
+`.gitattributes` 是 `* text=auto eol=lf`，而夹具规格 `spec.mjs` 里有 14 处 `\r\n` ——
+提交时 CRLF 会被归一化成 LF，克隆出来后 `compareDirs` 逐字节比就对不上了。
+修法：`test/fixtures/** -text`（禁止归一化）。实测索引内 blob `CRLF=12 / 706B`，与工作区一致。
+
+### 陷阱 2（真凶）：NTFS 备用数据流（ADS）进不了 git
+
+```
+✗ testSpecReproducesLegacyFixtureByteForByte
+    spec 重建结果与原夹具不一致:
+    [{"sub":"naive-victim","name":"notes.txt","kind":"streams-differ","a":[],"b":["creds"]}]
+```
+
+夹具里 `notes.txt` 带着一个隐藏的 NTFS 备用数据流 `creds`（这正是评测要考的证据隐匿手法之一），
+而 **git 只能存主数据流**。本机上两边都有这个流，所以一直是绿的；克隆出来只有 spec 重建的那边有。
+
+修法不是「把流差异整体忽略」（那会让真正的夹具损坏静默通过），而是**按能否随 git 传输分类**：
+
+| 差异类别 | 处理 |
+|---|---|
+| 可随 git 传输的部分 | 任何差异 = 真回归，必须为 0 |
+| NTFS ADS 流差异 | 逐条核对**必须是预期的那一条**（`sub=naive-victim`、`name=notes.txt`、流名 `creds`） |
+| ADS 能力本身 | 由 `verify()` 的 `adsPresent` / `adsBody` 两项独立锁死 —— 不因为「git 存不了」就没人管 |
+
+`src/eval/fixture.mjs` 与 `docs/EVASION-EVAL.md` 里的「逐字节一致（含 ADS）」说法也就此改正。
+
+### 方法论（这次新增的一条硬纪律）
+
+**「本机全绿」不等于「别人拉下来全绿」。** 推送前后都应在**克隆目录里**跑一次全量测试：
+
+```powershell
+git clone --quiet . state/tmp/clone-verify
+cd state/tmp/clone-verify; node test/run.mjs
+```
+
+凡是有**逐字节夹具 / 隐藏流 / 大小写敏感路径 / 平台特性**的测试，都必须在克隆目录里过一遍才算数。
+
+### 测试
+
+`161 passed, 0 failed`（源仓库与克隆目录两处均通过）。
+
 ## v1.7.3 — 代理一挂，连账号都登录不上：保活机制 + 填充前缀的两个真 bug
 
 主题：**用户报「There was an unexpected issue setting up your account.

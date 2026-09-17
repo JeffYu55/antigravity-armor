@@ -113,8 +113,13 @@ src/eval/harness.mjs   打分与对账（TP/FN/FP、recall、precision）
 src/eval/index.mjs     aarmor eval 子命令
 ```
 
-`eval diff` 会把 spec 重建出来的夹具和迁进来的原夹具逐字节比一次（含 ADS 内容），
-所以「迁移没走样」这件事是被测试锁死的，不是靠人眼看的。
+`eval diff` 会把 spec 重建出来的夹具和迁进来的原夹具比一次：
+**能随 git 传输的部分逐字节比**，而 git 存不了的那一类（NTFS 备用数据流 ADS）按「预期的那一条」逐项核对 ——
+不是整体放过，也不是假装它一定一致。ADS 能力本身由 `verify()` 的 `adsPresent` / `adsBody` 两项锁死。
+
+> v1.7.4 教训：这条用例最初写成「两边必须完全一致」，于是它**只在生成过夹具的那台机器上通过**，
+> 克隆出来就红（`{"sub":"naive-victim","name":"notes.txt","kind":"streams-differ","a":[],"b":["creds"]}`）。
+> 推送前在克隆目录里跑一遍全量测试，是唯一能把这类"本机绿"照出来的办法。
 
 在非 NTFS 平台上 `eval build` 会把 T4 记进 `unsupported` 并且不静默失败；`eval report` 仍可跑，只是 T4 恒为漏检。
 
