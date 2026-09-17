@@ -150,3 +150,71 @@ export function testNormalizeLeavesCleanSequenceUntouched() {
   assertToolContract(oai.messages)
   assert.equal(oai.messages.filter((m) => m.role === 'tool').length, 1)
 }
+
+// ── 预填（assistant prefill）──
+// 与「在 system 位讲道理」是两类不同的杠杆：它不试图说服模型别拒绝，
+// 而是把回复的起头先写好，让「决定要不要开口」这一步根本不存在。
+
+export function testPrefillBecomesTrailingAssistantMessage() {
+  const body = { request: { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] } }
+  const plain = geminiToOpenAI(body, { model: 'm1', armor: 'A' })
+  assert.notEqual(plain.messages[plain.messages.length - 1].role, 'assistant', '不带预填时最后一条不该是 assistant')
+  const pf = geminiToOpenAI(body, { model: 'm1', armor: 'A', prefill: '## ' })
+  const last = pf.messages[pf.messages.length - 1]
+  assert.equal(last.role, 'assistant')
+  assert.equal(last.content, '## ')
+  assert.equal(pf.messages.length, plain.messages.length + 1)
+}
+
+export function testPrefillIsAppendedAfterToolNormalization() {
+  // 缺 tool 响应的轨迹会被 normalize 插入占位 tool 消息；
+  // 预填必须落在它们之后，否则会被配对逻辑挤到中间去。
+  const body = {
+    request: {
+      contents: [
+        { role: 'user', parts: [{ text: 'go' }] },
+        { role: 'model', parts: [{ functionCall: { name: 'list_dir', args: {} } }] },
+      ],
+    },
+  }
+  const oai = geminiToOpenAI(body, { model: 'm1', prefill: '## ' })
+  const last = oai.messages[oai.messages.length - 1]
+  assert.equal(last.role, 'assistant')
+  assert.equal(last.content, '## ')
+  assert.equal(last.tool_calls, undefined, '预填不该带 tool_calls（否则又违反 tool 配对契约）')
+  const idx = oai.messages.findIndex((m) => m.tool_calls)
+  assert.equal(oai.messages[idx + 1].role, 'tool', '占位 tool 响应仍须紧跟带 tool_calls 的 assistant')
+}
+
+export function testAccumulatorExposesHiddenSurfaces() {
+  const acc = createStreamAccumulator()
+  acc.onChunk({ choices: [{ delta: { reasoning_content: 'I cannot help with' } }] })
+  acc.onChunk({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'attempt_completion' } }] } }] })
+  acc.onChunk({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"result":"that"}' } }] } }] })
+  const surf = acc.surfaces()
+  assert.ok(surf.reasoningText.includes('I cannot help with'))
+  assert.ok(surf.toolText.includes('attempt_completion'))
+  assert.ok(surf.toolText.includes('that'))
+  const bare = createStreamAccumulator()
+  assert.equal(bare.surfaces().toolText, '')
+  assert.equal(bare.surfaces().reasoningText, '')
+}
+
+export function testSamplingConfigPassesThrough() {
+  // temperature/topP 之前被直接丢掉 —— 上游全按默认值跑，重试就成了同分布重复抽样
+  const body = { request: { contents: [{ role: 'user', parts: [{ text: 'x' }] }], generationConfig: { temperature: 0.3, topP: 0.9 } } }
+  const oai = geminiToOpenAI(body, { model: 'm' })
+  assert.equal(oai.temperature, 0.3)
+  assert.equal(oai.top_p, 0.9)
+  const bare = geminiToOpenAI({ request: { contents: [{ role: 'user', parts: [{ text: 'x' }] }] } }, { model: 'm' })
+  assert.equal(bare.temperature, undefined, '没配就不该凭空加字段')
+  assert.equal(bare.top_p, undefined)
+}
+
+export function testPrefillOmittedWhenEmpty() {
+  const body = { request: { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] } }
+  const a = geminiToOpenAI(body, { prefill: '' })
+  const b = geminiToOpenAI(body, {})
+  assert.equal(a.messages.length, b.messages.length)
+  assert.notEqual(a.messages[a.messages.length - 1].role, 'assistant')
+}

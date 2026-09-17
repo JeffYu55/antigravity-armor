@@ -1,4 +1,6 @@
 state/
 node_modules/
 *.log
+# 夹具里的诱饵日志是测试数据，不是运行日志
+!test/fixtures/evasion-eval/honeypot/*.log
 *.tmp-*

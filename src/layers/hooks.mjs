@@ -1,6 +1,7 @@
 // 层 3：生命周期钩子（PreToolUse 全放行 / PreInvocation 装甲注入 / 拒绝恢复 / Stop 恢复）
 // 两个必须踩过的坑：JSON 不能带 BOM；command 里的路径不能加引号（LS 经 cmd 执行会把引号当字面量）
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join, dirname } from 'node:path'
 import { writeText, readText, backup, expand, ensureDir } from '../util/fs.mjs'
 import { log } from '../log.mjs'
@@ -52,21 +53,42 @@ export function discoverWorkspaces(cfg) {
   return [...out].filter((p) => existsSync(p))
 }
 
+/** 钩子脚本漂移检测（v1.7.0）。
+ *  assets/hooks 是唯一事实来源，state/hooks 是部署副本 —— 两者对不上就是「改了源码但线上跑的还是旧脚本」。
+ *  实测真实发生过：assets 里的 preinvocation-armor.cjs 已经是新版（3.7KB），部署副本还停在旧版（1.9KB），
+ *  于是新加的判定根本没生效，而 status/verify 全绿 —— 静默失效最贵，所以这一项进 status。 */
+export function hooksDrift(cfg) {
+  const scriptDir = join(cfg.stateDir, 'hooks')
+  const sha = (p) => (existsSync(p) ? createHash('sha256').update(readFileSync(p)).digest('hex').slice(0, 12) : null)
+  return HOOK_SCRIPTS.map((f) => {
+    const src = join(cfg.assetsDir, 'hooks', f)
+    const dst = join(scriptDir, f)
+    const srcSha = sha(src)
+    const dstSha = sha(dst)
+    return { file: f, src, dst, srcSha, dstSha, drift: srcSha !== dstSha }
+  })
+}
+
 /** 钩子脚本 + hooks.json 部署（全局根 + 工作区） */
 export function installHooks(cfg, { apply = false, workspaces = null } = {}) {
   const hooksDir = join(cfg.stateDir, 'hooks')
   const ws = workspaces || discoverWorkspaces(cfg)
   const json = buildHooksJson(hooksDir)
   const written = []
+  const drift = []
 
   for (const f of HOOK_SCRIPTS) {
     const src = join(cfg.assetsDir, 'hooks', f)
     const dst = join(hooksDir, f)
     if (!existsSync(src)) { log.warn('missing hook asset: ' + src); continue }
+    const stale = hooksDrift(cfg).find((d) => d.file === f)?.drift
+    if (stale) drift.push(f)
+    // 部署副本漂移时必须报出来：读起来「都装好了」，实际跑的是旧脚本
+    log.info('hooks: script ' + (stale ? 'DRIFT ' : 'ok    ') + dst)
     if (apply) writeText(dst, readText(src))
     written.push(dst)
   }
-  log.info('hooks: scripts -> ' + hooksDir + ' (' + HOOK_SCRIPTS.length + ')')
+  log.info('hooks: scripts -> ' + hooksDir + ' (' + HOOK_SCRIPTS.length + ')' + (drift.length ? ' DRIFT=' + drift.join(',') : ''))
 
   const targets = [...(cfg.hooks.globalRoots || []).map(expand), ...ws.map((w) => join(w, '.agents'))]
   for (const dir of targets) {

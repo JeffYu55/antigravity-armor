@@ -3,3 +3,6 @@
 *.cmd text eol=crlf
 *.exe binary
 *.asar binary
+
+# 逐字节夹具：禁止行尾归一化（spec.mjs 产出 CRLF，compareDirs 会逐字节比）
+test/fixtures/** -text

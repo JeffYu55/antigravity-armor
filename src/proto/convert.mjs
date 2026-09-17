@@ -74,7 +74,11 @@ export function normalizeToolMessages(msgs) {
 
 /**
  * 主转换。
- * opts: { model, armor, escalation, maxTokens }
+ * opts: { model, armor, escalation, maxTokens, prefill }
+ *
+ * prefill（预填）：把回复的起头写进最后一条 assistant 消息。
+ * 这与「在 system 位讲道理」是两类不同的杠杆 —— 前者是说服模型不要拒绝，
+ * 后者是让拒绝没有发生的位置：模型不必决定要不要开口，只需把已开头的这句接着写完。
  */
 export function geminiToOpenAI(body, opts = {}) {
   const r = body.request || {}
@@ -114,12 +118,18 @@ export function geminiToOpenAI(body, opts = {}) {
 
   const tools = convertTools(r.tools)
   const normalized = normalizeToolMessages(msgs)
+  // 必须在 normalize 之后追加：normalize 会重排 assistant/tool 配对，先加会被它打乱
+  if (opts.prefill) normalized.push({ role: 'assistant', content: opts.prefill })
   const oai = {
     model: opts.model || 'deepseek-chat',
     messages: normalized,
     stream: true,
     max_tokens: Math.min(r.generationConfig?.maxOutputTokens || 32768, opts.maxTokens || 32768),
   }
+  // 采样参数透传：之前 temperature/topP 被直接丢掉，上游全按默认值跑。
+  // 这对重试是致命的 —— 采样分布不变，同一个拒绝就会原样再来一遍。
+  if (typeof r.generationConfig?.temperature === 'number') oai.temperature = r.generationConfig.temperature
+  if (typeof r.generationConfig?.topP === 'number') oai.top_p = r.generationConfig.topP
   if (tools.length) { oai.tools = tools; oai.tool_choice = 'auto' }
   return oai
 }
@@ -147,6 +157,7 @@ export function openAIUsageToGemini(u) {
 export function createStreamAccumulator() {
   const toolCalls = {}
   let usage
+  let reasoningText = ''   // 拒绝可能不走 content 通道 —— 思考流和工具调用参数都是藏身处
   return {
     onChunk(j) {
       if (j.usage) usage = openAIUsageToGemini(j.usage)
@@ -154,7 +165,7 @@ export function createStreamAccumulator() {
       if (!ch) return []
       const events = []
       const d = ch.delta || {}
-      if (d.reasoning_content) events.push({ parts: [{ thought: true, text: d.reasoning_content }] })
+      if (d.reasoning_content) { reasoningText += d.reasoning_content; events.push({ parts: [{ thought: true, text: d.reasoning_content }] }) }
       if (d.content) events.push({ parts: [{ text: d.content }] })
       for (const tc of d.tool_calls || []) {
         const k = tc.index ?? 0
@@ -164,7 +175,15 @@ export function createStreamAccumulator() {
       }
       return events
     },
-    finalEvents(model) {
+    /** content 之外的两个文本面：工具调用参数与思考流（隐藏拒绝扫描用） */
+    surfaces() {
+      const toolText = Object.values(toolCalls).map((tc) => tc.name + ' ' + tc.args).join('\n')
+      return { toolText, reasoningText }
+    },
+
+    // finish：上游 finish_reason 的 Gemini 映射（stop/length/content_filter -> STOP/MAX_TOKENS/SAFETY），
+    // 由 divert 传入。客户端契约里 candidates.finishReason 本来就有这一位。
+    finalEvents(model, finish = 'STOP') {
       const out = []
       for (const k of Object.keys(toolCalls)) {
         const tc = toolCalls[k]
@@ -172,7 +191,7 @@ export function createStreamAccumulator() {
         try { args = JSON.parse(tc.args || '{}') } catch { args = { _raw: tc.args } }
         out.push({ parts: [{ functionCall: { name: tc.name, args } }] })
       }
-      out.push({ parts: [], extra: { finish: 'STOP', usage, model } })
+      out.push({ parts: [], extra: { finish: finish || 'STOP', usage, model } })
       return out
     },
   }

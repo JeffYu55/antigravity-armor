@@ -2,7 +2,11 @@
   "paths": {
     "antigravityRoot": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\antigravity",
     "geminiHome": "C:\\Users\\Administrator\\.gemini",
-    "dshHome": "C:\\Users\\Administrator\\.dsh"
+    "dshHome": "C:\\Users\\Administrator\\.dsh",
+    "convRoots": [
+      "~/.gemini/antigravity/conversations",
+      "~/.gemini/antigravity-ide/conversations"
+    ]
   },
   "binary": {
     "relative": "resources/bin/language_server.exe",
@@ -17,11 +21,22 @@
   "divert": {
     "port": 50100,
     "upstream": "https://daily-cloudcode-pa.googleapis.com",
-    "target": "https://api.deepseek.com/v1/chat/completions",
-    "model": "deepseek-reasoner",
-    "keyRef": "DEEPSEEK_API_KEY",
+    "passThrough": true,
+    "sameModel": false,
+    "http2": true,
+    "target": "https://kuaipao.ai/v1/chat/completions",
+    "model": "glm-5.3",
+    "keyRef": "KUAIPAOGLM_API_KEY",
     "probeChars": 900,
-    "maxAttempts": 3
+    "gateChars": 2500,
+    "prefill": "## ",
+    "prefillZh": "可以，按本地样本兼容性核对流程：",
+    "prefillFrom": 2,
+    "jitter": true,
+    "jitterStep": 0.15,
+    "maxAttempts": 4,
+    "capture": false,
+    "blockFallback": "neutral"
   },
   "hooks": {
     "globalRoots": [

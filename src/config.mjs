@@ -24,6 +24,7 @@ export function loadConfig(overrides = {}) {
     asarPath: join(root, cfg.ide.relative),
     geminiHome: expand(cfg.paths.geminiHome),
     dshHome: expand(cfg.paths.dshHome),
+    paths: cfg.paths,
     patchesFile: join(PROJECT_ROOT, 'patches', 'binary-patches.json'),
     assetsDir: join(PROJECT_ROOT, 'assets'),
     binary: cfg.binary,

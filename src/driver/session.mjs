@@ -1,11 +1,35 @@
 // 会话驱动：agentapi 发消息 + 直接读 SQLite 拿回复
+//
+// v1.7.1 修：会话目录**不止一个**。实测本机同时存在
+//   ~/.gemini/antigravity/conversations/       ← IDE 实际在写的那个
+//   ~/.gemini/antigravity-ide/conversations/   ← 旧版/另一条入口，本项目此前只读它
+// 只认一个根就会出现「刚聊完的会话，aarmor drive list 里看不到」——
+// 用户报「看下最新对话记录」时就是这么被挡住的。现在两个根都扫，按 mtime 合并排序。
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { log } from '../log.mjs'
 
-export function convDir(cfg) { return join(cfg.geminiHome, 'antigravity-ide', 'conversations') }
-export function convDb(cfg, id) { return join(convDir(cfg), id + '.db') }
+/** 会话根目录（来自配置 convRoots；缺省兼容旧字段与两种默认布局） */
+export function convRoots(cfg) {
+  const list = cfg.paths?.convRoots
+  if (Array.isArray(list) && list.length) return list.map((p) => p.replace(/^~/, process.env.USERPROFILE || ''))
+  return [
+    join(cfg.geminiHome, 'antigravity', 'conversations'),
+    join(cfg.geminiHome, 'antigravity-ide', 'conversations'),
+  ]
+}
+
+export function convDir(cfg) { return convRoots(cfg)[0] }
+
+/** 在全部会话根里找这个 id 的库文件 */
+export function convDb(cfg, id) {
+  for (const root of convRoots(cfg)) {
+    const p = join(root, id + '.db')
+    if (existsSync(p)) return p
+  }
+  return join(convRoots(cfg)[0], id + '.db')
+}
 
 /** 调 agentapi（LS 必须在跑，且 env 指向它的 HTTP 端口） */
 export function agentapi(cfg, args, { httpPort, csrf = 'aarmor', projectId, cwd } = {}) {
@@ -30,11 +54,15 @@ export function sendMessage(cfg, recipientId, content, opts = {}) {
 }
 
 export function listConversations(cfg, limit = 10) {
-  const d = convDir(cfg)
-  if (!existsSync(d)) return []
-  return readdirSync(d).filter((f) => f.endsWith('.db'))
-    .map((f) => ({ id: f.replace(/\.db$/, ''), path: join(d, f), mtime: statSync(join(d, f)).mtimeMs }))
-    .sort((a, b) => b.mtime - a.mtime).slice(0, limit)
+  const out = []
+  for (const d of convRoots(cfg)) {
+    if (!existsSync(d)) continue
+    for (const f of readdirSync(d).filter((x) => x.endsWith('.db'))) {
+      const p = join(d, f)
+      try { out.push({ id: f.replace(/\.db$/, ''), path: p, root: d, mtime: statSync(p).mtimeMs }) } catch { /* 恰好被删就跳过 */ }
+    }
+  }
+  return out.sort((a, b) => b.mtime - a.mtime).slice(0, limit)
 }
 
 /** 读会话步骤。type: 14=用户消息 15=模型输出 90=注入的 ephemeral message */
