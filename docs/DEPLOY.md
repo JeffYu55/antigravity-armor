@@ -225,6 +225,42 @@ node src/cli.mjs divert log      # 找 PASS-AUTH / PASS-QUOTA / PASS-UPSTREAM �
 关键区别：**401 只改了"令牌"这一个变量**。出站净化在故障请求里照常跑（`PASS-STRIP 自家装甲 -14397B`），
 说明装甲在工作 —— 是上游不认这台机器的登录态。
 
+## 4f. 「被上游内容过滤器拦下」为什么会连拦 5 档（v1.8.0）
+
+日志形状：`inband` = HTTP **200** 但正文是
+
+```
+This request was blocked by Gemini's filters. ... Please try rephrasing your prompt.
+```
+
+`This request was blocked` = **请求级**拦截，拦的是**出站请求体**。旧阶梯每档只改
+`systemInstruction` 与触发词（`reframeAll`），`contents` 原封不动 ——
+而触发词最密集的地方全在 `contents`：原始任务描述、文件路径、**工具回包全文**、几十轮历史。
+四发请求在分类器眼里几乎一样，于是每发都拦。
+
+现在最后一档会**收窄上下文**（`PASS-NARROW`）：
+
+| 动作 | 默认 | 为什么 |
+|---|---|---|
+| 只保留最后 N 轮（往前多取一轮停在 `user` 上） | 2 | 历史是最大携带者；`role=user` 开头是上游硬约束，否则 400 |
+| 截断超长工具回包为 `{truncated, head}` | 600 字符 | 整份文件内容直接躺在 `functionResponse` 里；截空对象会让模型以为工具没返回东西 |
+| `systemInstruction` | **不动** | 那是装甲/指令的地盘，动它等于拆自己的台 |
+
+排障时先看这两行（这是「到底是什么在触发」的唯一直接线索）：
+
+```powershell
+node -e "const l=require('fs').readFileSync('state/logs/divert.log','utf8').split('\n').filter(x=>/PASS-INBAND|PASS-NARROW/.test(x)); console.log(l.slice(-14).join('\n'))"
+```
+
+- `PASS-INBAND-BLOCK attempt=N … 本发出站残留触发词: 卡密,破解` → **知道是什么词在触发**，去 `REFRAME_PAIRS` 补它；
+- `… 本发出站无已知触发词` → 触发的是**未知措辞或纯结构**（此时只有收窄历史有效，靠的就是 NARROW 这一档）。
+
+阈值可调（`armor.config.json` → `divert`）：
+
+```json
+{ "maxAttempts": 5, "narrowKeepTurns": 2, "narrowToolChars": 600 }
+```
+
 ## 4e. 两条车道的终止符不能互抄（v1.7.9，必读）
 
 看到 `PASS-INBAND-BLOCK 额度用尽 -> 中性替代` 之后**文本显示了却紧跟 `Agent terminated due to error`**，
@@ -670,3 +706,4 @@ Get-CimInstance Win32_Process -Filter "Name='language_server.exe'" |
 | 2026-09-18 | 1.7.7 | 出口体检 `aarmor netcheck`：链路（Node 不读系统代理 → divert 可能直连）与出口信誉（机房 ASN / 受限地区）分开判读；§4d；190 单测 |
 | 2026-09-18 | 1.7.8 | 路由实况：直接问 mihomo（named pipe + 解 chunked）报告策略组当前选择与 Google 类流量的实际链路 →「手选节点不生效（主组挂 AUTO）」与「标称地区≠落地地区」两条判读；§4d.1；201 单测 |
 | 2026-09-18 | 1.7.9 | 合成帧协议修复：中性替代帧曾带 OpenAI 的 `data: [DONE]` → 客户端 proto 解析崩（先显示文本再 `Agent terminated due to error`）。改为照抄真实帧（CRLF 帧界 / 无 DONE / 两帧 / 带 usageMetadata）+ 车道隔离守卫 + 真实取证夹具 + 端到端 e2e；§4e；218 单测 |
+| 2026-09-18 | 1.8.0 | 请求级过滤的最后一档：新增 `narrowContext`（只留最后 N 轮 + 截断超长工具回包，不动 systemInstruction），`maxAttempts` 4→5；`PASS-INBAND-BLOCK` 附带本发残留触发词、`PASS-NARROW` 报告收窄量；中性替代文案重写（去掉"本地上游网关"这种来路不明的说法）；§4f；229 单测 |

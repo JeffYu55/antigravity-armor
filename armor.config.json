@@ -34,7 +34,9 @@
     "prefillFrom": 2,
     "jitter": true,
     "jitterStep": 0.15,
-    "maxAttempts": 4,
+    "maxAttempts": 5,
+    "narrowKeepTurns": 2,
+    "narrowToolChars": 600,
     "capture": false,
     "blockFallback": "neutral"
   },

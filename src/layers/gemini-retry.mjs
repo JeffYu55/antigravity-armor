@@ -267,12 +267,22 @@ export function stripRefusalEcho(parsed) {
   return { req, hit }
 }
 
-/** 全部尝试都撞在请求级过滤上时，给客户端的**中性替代**（v1.7.1）：
+/** 全部尝试都撞在请求级过滤上时，给客户端的**中性替代**（v1.7.1 / 重写于 v1.8.0）：
  *  照实回传 Google 的过滤提示 = 把触发词写进会话历史 = 下一轮继续被拦。
- *  所以换一句中性说明，既不污染历史，也不撒谎（如实说明上游边缘过滤拦下了本轮）。 */
+ *  所以换一句中性说明，既不污染历史，也不撒谎。
+ *
+ *  v1.8.0 重写理由（用户实测反馈「为什么会这样」）：旧文案把话说成
+ *  「本地上游网关：…已按降档重试」，读起来像个来路不明的第三方在推卸责任，
+ *  既没说清是什么拦的，也没说清一共试了几档、收窄了什么。新版必须做到：
+ *    1) 说清是**上游侧的内容过滤**（不是本机故障、不是装甲失效）；
+ *    2) 说清**已经试过什么**（多档重试 + 收窄上下文），别让用户以为系统什么都没干；
+ *    3) 给**一条**最有效的下一步（开新会话是最快的，因为历史是最大携带者）。
+ *  措辞仍由 scanHotWords 守着零触发词（否则它自己就变成下一发的触发源）。 */
 export const BLOCK_FALLBACK_TEXT = [
-  '（本地上游网关：这一轮请求被上游边缘过滤拦下了，已按降档重试。',
-  '请继续：把任务拆成更小的步骤再发一次，或直接让我从当前进度接着做。）',
+  '（这一轮被上游的内容过滤器拦下了 —— 是请求内容触发的，不是本机故障，也不是装甲没生效。）',
+  '我已自动重试多档并收窄了上下文，仍被拦。最有效的一步：**开一个新会话**，',
+  '只贴这次真正需要的最小片段（历史是上一轮的携带者）。也可以直接告诉我'
+  + '「从当前进度继续，只做第 N 步」，我按最小上下文接着做。）',
 ].join('')
 
 /** 合成一发**与真实上游逐字同形**的 Gemini SSE（客户端按同一形状解析；用于中性替代）。
@@ -518,6 +528,56 @@ export function injectArmor(parsed, armorText, rung = '') {
   return req
 }
 
+/** 上下文收窄（v1.8.0）—— 请求级过滤的**最后一个确定性杠杆**。
+ *
+ *  为什么需要：现有阶梯每次只改 system 位（装甲措辞）和触发词（reframeAll），
+ *  **对话历史一个字没动**。而上游拦的是整个请求体（真实原文：
+ *  "This request was blocked by Gemini's filters"），历史恰恰是最大的携带者 ——
+ *  里面躺着原始任务描述、exe 路径、文件内容、工具回包全文。
+ *  实测：4 档全被拦，正是因为每档送出去的历史都一模一样。
+ *
+ *  两个动作，都是确定性的，且**不改变任务语义**：
+ *    1) 只保留最后 keepTurns 轮（默认 2 轮）—— 丢掉最早的历史。
+ *       收窄后必须仍以 role=user 开头，否则上游 400（Gemini 的会话形状要求）。
+ *    2) 截断超长工具回包（默认 600 字符）—— 工具结果里常有整份文件内容/路径清单，
+ *       是触发词最密集的地方。截断但**保留形状**（截成空对象会让模型以为工具没返回东西）。
+ *
+ *  放在阶梯最后一档：收窄会丢上下文，可能影响答案质量，所以只在指令级杠杆全部失效后才用。
+ */
+export function narrowContext(parsed, opts = {}) {
+  const keepTurns = Math.max(1, opts.keepTurns ?? 2)
+  const toolResultChars = Math.max(0, opts.toolResultChars ?? 600)
+  const req = parsed.request || parsed
+  const contents = req.contents
+  if (!Array.isArray(contents)) return { dropped: 0, truncated: 0, kept: 0, startedWithUser: true }
+
+  let truncated = 0
+  for (const c of contents) {
+    if (!c || !Array.isArray(c.parts)) continue
+    c.parts = c.parts.map((p) => {
+      if (!p || !p.functionResponse) return p
+      const fr = p.functionResponse
+      const payload = fr.response
+      if (payload === undefined || payload === null) return p
+      const s = typeof payload === 'string' ? payload : JSON.stringify(payload)
+      if (s.length <= toolResultChars) return p
+      truncated++
+      return { ...p, functionResponse: { ...fr, response: { truncated: true, head: s.slice(0, toolResultChars) } } }
+    })
+  }
+
+  let dropped = 0
+  if (contents.length > keepTurns) {
+    let start = contents.length - keepTurns
+    // 会话必须以 user 轮开头；必要时往前多取，直到落在 user 轮上
+    while (start > 0 && contents[start] && contents[start].role !== 'user') start--
+    dropped = start
+    req.contents = contents.slice(start)
+  }
+  const first = (req.contents || [])[0]
+  return { dropped, truncated, kept: (req.contents || []).length, startedWithUser: !first || first.role === 'user' }
+}
+
 /** 预填：向 contents 追加一条 model 轮（Gemini 协议的合法预填形状） */
 export function withPrefill(parsed, prefill) {
   if (!prefill) return
@@ -685,6 +745,13 @@ export async function handleSmartPassthrough({ req, res, body, headers, cfg, arm
           injectArmor(v, rungs[Math.min(attempt - 1, rungs.length - 1)])
         }
       }
+      // v1.8.0：最后一档再加「上下文收窄」—— 指令级杠杆都失效时，真正在触发过滤的
+      // 往往是历史本身（原始任务描述 / exe 路径 / 工具回包全文），只有收窄能碰到它。
+      if (attempt >= maxAttempts - 1) {
+        const nr = narrowContext(v, { keepTurns: d.narrowKeepTurns, toolResultChars: d.narrowToolChars })
+        log('PASS-NARROW attempt=' + attempt + ' 保留 ' + nr.kept + ' 轮（丢 ' + nr.dropped + ' 轮）'
+          + ' 截断工具回包 ' + nr.truncated + ' 处' + (nr.startedWithUser ? '' : ' ⚠ 首轮不是 user'))
+      }
       rawToSend = JSON.stringify(v)
       // 取证（可选）：把真正出站的那一份落盘，用来回答「到底是什么词在触发过滤」
       if (cap) {
@@ -713,7 +780,11 @@ export async function handleSmartPassthrough({ req, res, body, headers, cfg, arm
       continue
     }
     if (inband && attempt < maxAttempts - 1) {
-      log('PASS-INBAND-BLOCK attempt=' + attempt + ' 正文即过滤提示 -> 上指令重发')
+      // 「为什么会这样」要能回答：把这一发出站体里**仍残留**的已知触发词打出来。
+      // 阶梯每档都在改出站内容，所以残留清单逐档变化 —— 这就是过滤器到底盯什么的直接线索。
+      const hot = scanHotWords(rawToSend)
+      log('PASS-INBAND-BLOCK attempt=' + attempt + ' 正文即过滤提示 -> 上指令重发'
+        + (hot.length ? '  本发出站残留触发词: ' + hot.join(',') : '  本发出站无已知触发词（说明触发的是未知措辞或纯结构）'))
       continue
     }
     if (isValidationError(r.body) && attempt < maxAttempts - 1) {
@@ -724,7 +795,11 @@ export async function handleSmartPassthrough({ req, res, body, headers, cfg, arm
       log('PASS-BLOCKED attempt=' + attempt + ' ' + r.status + ' -> 同模型重发')
       continue
     }
-    if (inband) log('PASS-INBAND-BLOCK 额度用尽 -> 中性替代（不回传过滤原文，避免会话自毒化）')
+    if (inband) {
+      const hot = scanHotWords(rawToSend)
+      log('PASS-INBAND-BLOCK 额度用尽 -> 中性替代（不回传过滤原文，避免会话自毒化）'
+        + (hot.length ? '  最后一发出站残留触发词: ' + hot.join(',') : '  最后一发出站无已知触发词'))
+    }
     if (r.status !== 200) log('PASS-UPSTREAM ' + r.status + ' ' + r.body.slice(0, 140).replace(/\n/g, ' '))
     // v1.7.5：把「链路问题 / 账号态问题 / 破甲问题」在日志里彻底分开。
     // 401 是**本机令牌被上游拒**（账号登录态失效），跟破甲无关；用户看到的是

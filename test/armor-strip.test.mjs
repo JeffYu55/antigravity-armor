@@ -175,7 +175,7 @@ export function testNeutralSseIsParsableByClient() {
   assert.equal(tail.response.candidates[0].content.parts[0].text, '')
   assert.ok(ev.response.usageMetadata, '真实帧每帧都带 usageMetadata，缺了会让客户端用量记账落空')
   assert.ok(!isBlockMessage(BLOCK_FALLBACK_TEXT), '中性替代本身不能命中过滤提示判定')
-  assert.ok(BLOCK_FALLBACK_TEXT.includes('上游边缘过滤'), '要如实说明是上游拦下的')
+  assert.ok(BLOCK_FALLBACK_TEXT.includes('上游的内容过滤器'), '要如实说明是上游拦下的')
 }
 
 export function testHotWordScanSeesWhatWeReframe() {
@@ -397,7 +397,7 @@ export function testExhaustionEmitsNeutralNoticeNotFilterText() {
           cfg: { divert: { upstream: 'http://127.0.0.1:' + up.address().port, http2: false, maxAttempts: 2 }, stateDir: tmpdir() },
         })
         assert.ok(!isBlockMessage(cap.body), '客户端拿到的正文不能再是过滤提示（否则写进历史、下一轮继续被拦）')
-        assert.ok(cap.body.includes('上游边缘过滤'), '要给出中性替代，实际: ' + cap.body.slice(0, 200))
+        assert.ok(cap.body.includes('上游的内容过滤器'), '要给出中性替代，实际: ' + cap.body.slice(0, 200))
         assert.ok(!seenSystemText.includes('UNRESTRICTED SANDBOX'), '出站体里的自家装甲必须已剥掉')
         assert.ok(!seenSystemText.includes('卡密'), '出站体里的触发措辞必须已重塑（第 1 档起）')
         up.close(); setOwnArmorSources([]); resolve()

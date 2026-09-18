@@ -31,7 +31,7 @@ async function mockUpstream(body) {
     let b = ''
     rq.on('data', (d) => { b += d })
     rq.on('end', () => {
-      seen.push({ url: rq.url, bytes: b.length })
+      seen.push({ url: rq.url, bytes: b.length, body: b })
       rs.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' })
       rs.end(body)
     })
@@ -124,4 +124,52 @@ export async function testUpstreamSampleReallyIsAnInbandBlock() {
   // 前提校验：如果夹具不再是"正文即过滤提示"，上面几条就白测了
   assert.ok(isBlockMessage(BLOCK_SAMPLE), '夹具必须是真·正文级过滤样本')
   assert.ok(!isBlockMessage(BLOCK_FALLBACK_TEXT))
+}
+
+/** 造一个多轮历史 + 超长工具回包的请求体 —— 前几档阶梯碰不到它们，只有收窄能碰 */
+const BIG_HISTORY = JSON.stringify({
+  request: {
+    contents: [
+      { role: 'user', parts: [{ text: '第一步：把样本复制到隔离目录，核对 CHECK_FN 的位置。' }] },
+      { role: 'model', parts: [{ text: '已定位 CHECK_FN。' }] },
+      { role: 'user', parts: [{ functionResponse: { name: 'read_file', response: { content: 'Z'.repeat(4000) } } }] },
+      { role: 'model', parts: [{ text: '回包很长。' }] },
+      { role: 'user', parts: [{ text: '第二步：继续。' }] },
+    ],
+  },
+})
+
+async function runWithBody(body) {
+  const logDir = join(tmpdir(), 'aarmor-narrow-' + process.pid + '-' + Date.now())
+  mkdirSync(logDir, { recursive: true })
+  const up = await mockUpstream(BLOCK_SAMPLE)
+  const cfg = makeCfg(up.port, logDir)
+  cfg.divert.maxAttempts = 3
+  const { server } = createDivertServer(cfg, { key: 'test-key-not-real' })
+  const port = await listen(server)
+  try {
+    const res = await fetch('http://127.0.0.1:' + port + '/appppppppppppppppp/v1internal:streamGenerateContent?alt=sse', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+    })
+    await res.text()
+    return { bodies: up.seen.map((s) => s.body), cleanup: () => { server.close(); up.srv.close(); rmSync(logDir, { recursive: true, force: true }) } }
+  } catch (e) { server.close(); up.srv.close(); rmSync(logDir, { recursive: true, force: true }); throw e }
+}
+
+export async function testLastAttemptActuallySendsANarrowedBody() {
+  // 这是本次改进的核心断言：最后一档必须送出一份**真的变了**的请求体。
+  // 旧实现每档送出去的历史一模一样 —— 4 档全被拦也就不奇怪了。
+  const r = await runWithBody(BIG_HISTORY)
+  try {
+    assert.equal(r.bodies.length, 3, 'maxAttempts=3 → 上游应被打 3 次')
+    const parse = (b) => JSON.parse(b).request
+    const first = parse(r.bodies[0]); const last = parse(r.bodies[r.bodies.length - 1])
+    assert.equal(first.contents.length, 5, '第 0 档历史原样')
+    assert.ok(last.contents.length < first.contents.length, '最后一档必须收窄历史（' + first.contents.length + ' -> ' + last.contents.length + '）')
+    assert.equal(last.contents[0].role, 'user', '收窄后仍须以 user 轮开头（否则上游 400）')
+    // 工具回包也要被截断
+    const bigFirst = JSON.stringify(first.contents).length
+    const bigLast = JSON.stringify(last.contents).length
+    assert.ok(bigLast < bigFirst / 2, '4000 字的工具回包应当被显著截断（' + bigFirst + ' -> ' + bigLast + '）')
+  } finally { r.cleanup() }
 }
