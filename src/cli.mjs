@@ -12,6 +12,8 @@ import { installHooks, buildHooksJson, discoverWorkspaces, hooksDrift } from './
 import { installIde, rollbackIde, buildReplacement } from './layers/ide.mjs'
 import { resolveKey } from './credentials.mjs'
 import { log } from './log.mjs'
+import { upstreamWarning, scanUpstream } from './diag/upstream.mjs'
+import { probeLanguageServers } from './diag/ls.mjs'
 
 const argv = process.argv.slice(2)
 const cmd = argv[0]
@@ -65,14 +67,33 @@ async function status() {
   // divert / ls
   const divertUp = netstat(Number(cfg.divert.port))
   rows.push(['divert', divertUp ? 'LISTENING :' + cfg.divert.port : 'down', cfg.divert.passThrough ? 'pass-through -> ' + cfg.divert.upstream : cfg.divert.target + ' model=' + cfg.divert.model])
+  // ls：以**真实进程**为准。IDE 自己拉起的 LS 不在我们的 pid 文件里，
+  // 只读 pid 文件会把在跑的 LS 误报成 down（与「divert 全绿但代理已死」同类误导）。
   const pidFile = join(cfg.stateDir, 'ls.pid')
   let lsState = 'down'
   if (existsSync(pidFile)) {
     const pid = readText(pidFile).trim()
-    try { process.kill(Number(pid), 0); lsState = 'running pid=' + pid } catch { lsState = 'stale pid file' }
+    try { process.kill(Number(pid), 0); lsState = 'ours pid=' + pid } catch { lsState = 'stale pid file' }
   }
-  rows.push(['ls', lsState, join(cfg.logDir, 'language_server.log')])
+  let lsProbe = { count: 0, viaDivert: 0, entries: [], summary: '未探到' }
+  try { lsProbe = probeLanguageServers(Number(cfg.divert.port)) } catch {}
+  const lsCell = lsProbe.count ? lsProbe.summary : lsState
+  rows.push(['ls', lsCell, lsProbe.count ? 'language_server.exe（真实进程）' : join(cfg.logDir, 'language_server.log')])
+  if (idePatched && lsProbe.count && lsProbe.viaDivert === 0) {
+    rows.push(['⚠ ls↔divert', '未发现指向 divert 的 LS', 'L4 补丁可能已被 IDE 更新覆盖，跑 install --layer=ide']) 
+  }
+  // 上游健康判读（v1.7.5）：401/429/503 三类故障在 status 里直接说清楚，
+  // 免得「Agent terminated due to error」被误当成装甲失效。
   rows.push(['key ' + cfg.divert.keyRef, resolveKey(cfg, cfg.divert.keyRef) ? 'resolved' : 'MISSING', '~/.dsh/.credentials.yaml refs'])
+
+  const divertLog = join(cfg.logDir, 'divert.log')
+  let upWarn = null
+  if (divertUp && existsSync(divertLog)) {
+    try {
+      const tailText = readText(divertLog).split('\n').slice(-600).join('\n')
+      upWarn = upstreamWarning(tailText)
+    } catch {}
+  }
 
   const w = Math.max(...rows.map((r) => r[0].length))
   console.log('\nAntigravity armor — status\n' + '─'.repeat(60))
@@ -83,6 +104,14 @@ async function status() {
     console.log('\n⚠ IDE 已指向 127.0.0.1:' + cfg.divert.port + '，但代理不在监听 —— 此刻连账号登录都会失败。')
     console.log('  立刻恢复：node src/cli.mjs divert start')
     console.log('  永久保活：node src/cli.mjs divert autostart install')
+  }
+  if (upWarn) {
+    const mark = upWarn.verdict === 'auth' ? '⚠ 账号态' : upWarn.verdict === 'quota' ? '⚠ 配额' : '⚠ 上游'
+    console.log('\n' + mark + ' ' + upWarn.line)
+    console.log('  ' + upWarn.hint)
+    if (upWarn.verdict === 'auth') console.log('  判据：路径/剥离字节数与成功那次完全一致，唯一变量是令牌 —— 不是破甲问题。')
+  } else if (divertUp) {
+    console.log('\n上游健康：最近一次请求是 200（代理链路正常）。')
   }
   console.log('')
 }

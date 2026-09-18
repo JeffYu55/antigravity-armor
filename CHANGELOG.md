@@ -1,5 +1,56 @@
 # Changelog
 
+## v1.7.5 — 「Agent terminated due to error」不是破甲失效，是账号令牌被上游拒了
+
+主题：用户看到 IDE 报 `Agent terminated due to error`，第一反应是「装甲又失效了」。
+**日志证明完全不是** —— 这是账号登录态问题。这一版把三类故障在工具层面彻底分开。
+
+### 证据链（state/logs/divert.log 逐字）
+
+```
+23:28:31 RELAY h2 -> 200
+23:28:31 PASS-GATE frames=2 text=0 thought=0 fc=1 finish=STOP refusal=no
+23:28:32 PASS-THROUGH POST //v1internal:streamGenerateContent?alt=sse
+23:28:32 PASS-STRIP 自家装甲 -14397B
+23:28:33 RELAY h2 -> 401        <- 两秒前还是 200
+23:28:33 PASS-UPSTREAM 401 { "error": { "code": 401,
+          "message": "Request had invalid authentication credentials.
+          Expected OAuth 2 access token, login cookie or other valid authentication credential" } }
+23:52:39 RELAY h2 -> 401        <- 用户重试，还是 401
+```
+
+判据（为什么要排除破甲与链路）：
+
+| 检查项 | 结果 |
+|---|---|
+| IDE→LS→divert 链路 | `ls running ×1，其中 1 个指向 divert`（L4 补丁在，端点没被覆盖） |
+| 出站净化是否在跑 | 故障请求 `PASS-STRIP 自家装甲 -14397B`，与 2 秒前那次成功的**完全一致** |
+| 请求路径 | 与成功那次同为 `//v1internal:streamGenerateContent?alt=sse` |
+| 请求是否带令牌 | `auth=true`（DUMP 配对：193 次 200 全部 auth=true） |
+| 上游原文 | **401 invalid authentication credentials** —— 唯一变量是令牌 |
+
+=> 修法是**重新登录**，不是加装甲。代理与装甲都没问题。
+
+### 新增能力
+
+1. **`PASS-AUTH` / `PASS-QUOTA` 日志行**：401/403 直接写明「上游拒绝本机令牌 —— 账号登录态失效，
+   不是破甲问题：在 Antigravity 里重新登录即可」；429 写明是账号配额而非链路。
+2. **`status` 上游健康判读**（`src/diag/upstream.mjs`）：
+   只看**最后一次 200 之后**发生的事 —— 早先的 401 之后又恢复 200 的，不挂告警（否则历史噪声永远在）。
+   ```
+   ⚠ 账号态 上游最近 2 次请求失败（401，最后一次 23:52:39），在此之前 23:28:31 还是 200
+     账号登录态失效（令牌被上游拒）—— 在 Antigravity 里重新登录即可。代理链路本身是通的。
+     判据：路径/剥离字节数与成功那次完全一致，唯一变量是令牌 —— 不是破甲问题。
+   ```
+   三类故障分开：`auth` 401/403（重登录）/ `quota` 429（配额）/ `capacity` 503（换模型）。
+3. **`ls` 行改为以真实进程为准**（`src/diag/ls.mjs`）：以前读我们自己的 `state/ls.pid`，
+   而干活的 LS 是 IDE 自己拉起的 —— 明明在跑却显示 `down`（与「divert 全绿但代理已死」同一类误导）。
+   现在显示 `running ×N，其中 M 个指向 divert`；若 LS 不再指向 divert（补丁被 IDE 更新覆盖）会另起一行告警。
+
+### 测试
+
+`173 passed, 0 failed`（新增 `test/upstream.test.mjs` 7 条 + `test/ls-diag.test.mjs` 5 条）。
+
 ## v1.7.4 — 推送后克隆验证：一条「只在本机绿」的夹具用例 + 行尾归一化陷阱
 
 主题：**把项目推上 GitHub 之后，我在克隆出来的目录里跑了一遍全量测试 —— 红了。**

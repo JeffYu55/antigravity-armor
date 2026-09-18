@@ -706,6 +706,15 @@ export async function handleSmartPassthrough({ req, res, body, headers, cfg, arm
     }
     if (inband) log('PASS-INBAND-BLOCK 额度用尽 -> 中性替代（不回传过滤原文，避免会话自毒化）')
     if (r.status !== 200) log('PASS-UPSTREAM ' + r.status + ' ' + r.body.slice(0, 140).replace(/\n/g, ' '))
+    // v1.7.5：把「链路问题 / 账号态问题 / 破甲问题」在日志里彻底分开。
+    // 401 是**本机令牌被上游拒**（账号登录态失效），跟破甲无关；用户看到的是
+    // "Agent terminated due to error"，很容易误当成装甲又失效了。
+    if (r.status === 401 || r.status === 403) {
+      log('PASS-AUTH ' + r.status + ' 上游拒绝本机令牌 —— 账号登录态失效，不是破甲问题：'
+        + '在 Antigravity 里重新登录即可（代理链路已验证正常）。')
+    } else if (r.status === 429) {
+      log('PASS-QUOTA 429 上游额度用尽 —— 账号侧配额，不是链路问题（等配额恢复或换 lane/模型）')
+    }
     // 客户端中途断开后写入已销毁 socket 会抛未捕获异常、把常驻代理带走（实测 222KB 请求后静默死亡）。
     if (res.destroyed || res.writableEnded) { log('PASS-CLIENT-GONE 客户端已断开，丢弃本发响应'); return }
     try {

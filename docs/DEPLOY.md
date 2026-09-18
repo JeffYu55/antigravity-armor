@@ -200,6 +200,31 @@ Get-Content state\logs\divert-watchdog.log -Tail 5                              
 node src/cli.mjs rollback --layer=ide        # app.asar 恢复指向 Google，不再依赖本地代理
 node src/cli.mjs install --layer=ide --apply # 之后可以再打回来
 ```
+
+---
+
+## 4c. 故障三分法（v1.7.5，必读）
+
+IDE 报 `Agent terminated due to error` 时，**不要先怀疑装甲**。`status` 现在直接给出判读：
+
+```powershell
+node src/cli.mjs status          # 末几行会直接写「⚠ 账号态 /  配额 /  上游」或「上游健康」
+node src/cli.mjs divert log      # 找 PASS-AUTH / PASS-QUOTA / PASS-UPSTREAM 原文
+```
+
+| 症状 | 判据 | 修法 |
+|---|---|---|
+| **账号态**（401/403） | `PASS-UPSTREAM 401 invalid authentication credentials`；且**失败那次的路径与剥离字节数和上一次 200 完全一致** | 在 Antigravity 里**重新登录**。代理链路是通的，跟装甲无关 |
+| **配额**（429） | `PASS-QUOTA 429` / `RESOURCE_EXHAUSTED` | 等配额恢复，或换 lane / 模型 |
+| **容量**（503） | `No capacity available for model X` | 换模型即可 |
+| **链路**（代理死） | `dial tcp 127.0.0.1:50100: connectex` | `divert start`（+ `autostart install`） |
+| **破甲**（真失效） | `PASS-GATE ... text=` 有正文却是拒答措辞；或 `PASS-REFUSAL` 反复触发 | 才轮到改装甲/规则 |
+
+关键区别：**401 只改了"令牌"这一个变量**。出站净化在故障请求里照常跑（`PASS-STRIP 自家装甲 -14397B`），
+说明装甲在工作 —— 是上游不认这台机器的登录态。
+
+`ls` 行现在以**真实进程**为准（`running ×N，其中 M 个指向 divert`）；若显示 `未指向 divert`，
+说明 L4 补丁被 IDE 更新覆盖了，跑 `node src/cli.mjs install --layer=ide --apply` 打回。
 | L5 端到端 | 见下一节 | blocked=false 且回复有实质内容 |
 | **回归** | node scripts/regression-clean-binary.mjs <原始exe备份> | `identical to live: true`（从原始文件重放 41 处补丁，结果与线上逐字节一致） |
 
@@ -548,3 +573,5 @@ Get-CimInstance Win32_Process -Filter "Name='language_server.exe'" |
 | 2026-09-17 | 1.7.1 | 出站净化：剥掉自家装甲正文（14.4KB/请求）+ 技能 description 去触发词 + 过滤回声护栏 + 中性替代 + 抓包取证；会话多根读取；155 单测 |
 | 2026-09-17 | 1.7.2 | 上游帧形状解包修复（`response` 包裹，拒答闸门此前从未读到正文）+ `PASS-GATE` 可见性日志 + 入站原始 SSE 取证 + 历史拒答净化 + 拒答回声（transcript 读回）清理；160 单测 |
 | 2026-09-17 | 1.7.3 | 代理保活（`ensure` / `watchdog` / `autostart`，无管理员权限时降级启动文件夹）+ `status` 致命组合告警 + `stripPad` 绝对 URI 与 `/api` 误伤两个 bug；161 单测 |
+| 2026-09-18 | 1.7.4 | 推送后克隆验证：夹具逐字节用例改成「按能否随 git 传输分类」（NTFS ADS 进不了 git）+ `test/fixtures/** -text` 禁行尾归一化；161 单测 |
+| 2026-09-18 | 1.7.5 | 故障三分法：`PASS-AUTH`/`PASS-QUOTA` 日志 + `status` 上游健康判读（只看最后一次 200 之后）+ `ls` 行改以真实进程为准（`running ×N，其中 M 个指向 divert`）；173 单测 |

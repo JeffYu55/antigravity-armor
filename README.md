@@ -202,6 +202,14 @@ node src/cli.mjs divert ensure              # 幂等保活，供计划任务调�
 `status` 现在会把「IDE 已指向本地代理 + 代理 down」这个致命组合直接喊出来（以前是全绿的）。
 实在起不来时用 `rollback --layer=ide` 立刻回到官方通道，之后 `install --layer=ide --apply` 再打回来。
 
+**「Agent terminated due to error」先别怀疑装甲（v1.7.5）**：
+
+实测日志（2026-09-18）：23:28:31 一次 200 → 两秒后 **401 invalid authentication credentials**。
+故障请求的路径与出站剥离字节数（`PASS-STRIP 自家装甲 -14397B`）**与成功那次完全一致**，唯一变量是令牌。
+=> 这是**账号登录态失效**，在 Antigravity 里重新登录即可；代理链路已验证通。
+`status` 现在会把三类故障分开写明（`auth` 重登录 / `quota` 等配额 / `capacity` 换模型），
+只在**最后一次 200 之后**才报警 —— 已自愈的历史 401 不会一直挂着。
+
 **静默失效的两道哨兵（v1.7.0，都踩过）**：
 
 - `aarmor status` 里的 `hook scripts` 行 —— `assets/hooks` 是事实来源、`state/hooks` 是部署副本，
