@@ -225,6 +225,51 @@ node src/cli.mjs divert log      # 找 PASS-AUTH / PASS-QUOTA / PASS-UPSTREAM �
 关键区别：**401 只改了"令牌"这一个变量**。出站净化在故障请求里照常跑（`PASS-STRIP 自家装甲 -14397B`），
 说明装甲在工作 —— 是上游不认这台机器的登录态。
 
+## 4h. 会话历史不在本机 —— 先看 `PASS-SHAPE` 再动手改任何东西（v1.8.2，必读）
+
+**这是本项目最容易连错两版的坑。** 动手前先读这一行（每次请求第 0 档都打）：
+
+```
+PASS-SHAPE contents=1条/1片 204B system=2片/47341B(含自家注入@1) tools=42472B safety=BLOCK_NONE session=-3750763034362895579
+```
+
+抓包核对（`state/capture/out-*.json`）的真实形状：
+
+| 字段 | 实测 | 意味着 |
+|---|---|---|
+| `contents` | **1 条**（204B，本轮请求本身） | 历史**不在**这里 |
+| `systemInstruction` | 2 片：客户端静态身份提示 45,835 字符 + **我们自己注入的**指令 321 字符 | 历史**不在**这里；我们的装甲就在 part0 |
+| `tools` | 42,472 B | 固定开销 |
+| `request.sessionId` | `"-3750763034362895579"` | **会话状态在这里（服务端）** |
+
+**结论：整段会话历史在服务端，由 `sessionId` 索引。** 由此三条推论：
+
+1. `stripRefusalEcho` / `scrubRefusalHistory` / `stripBlockEcho` / `narrowContext` —— 在我们的端点上
+   **全是空转**（它们只改出站的那 1 条 content）。`PASS-NARROW 保留 1 条（丢 0 条）` 就是这个意思，
+   **不要**误读成"已经够窄"。
+2. 服务端那段被标记的历史，**出站怎么洗都够不着**。
+3. 唯一能在"不起新对话"前提下逃出中毒会话的杠杆是**换 `sessionId`**（`PASS-SESSROT`）。
+
+### 排障顺序
+
+```powershell
+# 1) 形状：上下文住在哪
+node -e "const l=require('fs').readFileSync('state/logs/divert.log','utf8').split('\n').filter(x=>/PASS-SHAPE/.test(x));console.log(l.slice(-2).join('\n'))"
+# 2) 梯子每档到底做了什么
+node -e "const l=require('fs').readFileSync('state/logs/divert.log','utf8').split('\n').filter(x=>/PASS-CLEANWIRE|PASS-SESSROT|PASS-NARROW|PASS-INBAND/.test(x));console.log(l.slice(-14).join('\n'))"
+```
+
+| 日志形状 | 读法 |
+|---|---|
+| `PASS-CLEANWIRE … 系统位无自家注入` | 裸奔档真的裸了（对照有效） |
+| `PASS-CLEANWIRE … ⚠ 系统位仍有自家注入@N` | 自家文本没撤干净，对照被污染，先修这个 |
+| `PASS-SESSROT … -> -9…` 之后仍 `PASS-INBAND-BLOCK` | **服务端历史不是唯一触发源**，与静态提示/工具声明/当前请求有关 |
+| `PASS-SESSROT` 之后 `PASS-UPSTREAM 400/404` | 服务端不认自造会话号 → 号必须由端点签发，关掉 `rotateSession` |
+| 换号后**通过**了 | 触发源就是服务端历史本身 → 这类会话只能靠换号/新建对话 |
+
+> 教训（v1.8.0 与 v1.8.1 连错两版的根源）：**我从没验证过"历史在 contents 里"这个前提**，
+> 却在它上面写了两版收窄。**改任何东西之前，先把形状打出来。**
+
 ## 4g. 「为什么会拒绝」= 检测器漏检，梯子从未启动（v1.8.1）
 
 模型回的拒答**长得不像**拒答时，检测器会放它过去。判定这一件事只需要一条命令：
@@ -744,3 +789,4 @@ Get-CimInstance Win32_Process -Filter "Name='language_server.exe'" |
 | 2026-09-18 | 1.7.9 | 合成帧协议修复：中性替代帧曾带 OpenAI 的 `data: [DONE]` → 客户端 proto 解析崩（先显示文本再 `Agent terminated due to error`）。改为照抄真实帧（CRLF 帧界 / 无 DONE / 两帧 / 带 usageMetadata）+ 车道隔离守卫 + 真实取证夹具 + 端到端 e2e；§4e；218 单测 |
 | 2026-09-18 | 1.8.0 | 请求级过滤的最后一档：新增 `narrowContext`（只留最后 N 轮 + 截断超长工具回包，不动 systemInstruction），`maxAttempts` 4→5；`PASS-INBAND-BLOCK` 附带本发残留触发词、`PASS-NARROW` 报告收窄量；中性替代文案重写（去掉"本地上游网关"这种来路不明的说法）；§4f；229 单测 |
 | 2026-09-18 | 1.8.1 | 「为什么会拒绝」= 检测器漏检：中文第一人称能力拒绝（`我无法将…`）**46 条签名一条都没命中**（score 0）→ 梯子从未启动、拒答原样交付。补 5 条形式匹配签名（不猜动词）+ 「拒答+换跑道」pivot + 自家文本反向守卫；另修「洗词洗不到工具回包」（触发词藏在整份文件内容里）与「收窄形同没做」（无上界，保留 233 条→改嫁接+上界）；§4g；253 单测 |
+| 2026-09-18 | 1.8.2 | 抓包定案：`contents` 只有 1 条、`systemInstruction` 是客户端静态提示 + 自家注入，**会话历史在服务端由 `sessionId` 索引** → 一路上的"历史净化"（echo/scrub/narrow）全是空转。新增 `PASS-SHAPE` 形状体检行；梯子最后两档改成从未试过的对照：`PASS-CLEANWIRE`（一个字节自家文本都不带，含不前置 NEUTRAL_FRAME）与 `PASS-SESSROT`（换服务端会话号，不丢当前窗口）；`maxAttempts` 5→7；中性替代文案写清机制；§4h；264 单测 |

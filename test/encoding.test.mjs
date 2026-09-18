@@ -64,4 +64,6 @@ export function testConfigChineseIsIntact() {
   assert.equal(cfg.divert.narrowKeepTurns, 2)
   assert.equal(cfg.divert.narrowToolChars, 600)
   assert.equal(cfg.divert.narrowMaxContents, 40, '收窄必须带上界（v1.8.1：实测无上界时保留了 233 条）')
+  assert.ok(cfg.divert.maxAttempts >= 7, '最后两档是裸奔对照与换会话号，需要足够档位（v1.8.2）')
+  assert.equal(cfg.divert.rotateSession, true, '换服务端会话号是唯一能逃出中毒会话的杠杆，默认开')
 }

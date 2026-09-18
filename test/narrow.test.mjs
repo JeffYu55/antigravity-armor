@@ -87,10 +87,12 @@ export function testDefaultKeepTurnsIsTwo() {
 // ——— 中性替代文案（用户直接看到的那句话）———
 
 export function testFallbackTextExplainsWhatHappenedAndWhatToDo() {
-  assert.match(BLOCK_FALLBACK_TEXT, /上游的内容过滤器/, '要说清是什么拦的')
-  assert.match(BLOCK_FALLBACK_TEXT, /不是本机故障/, '要明确排除本机故障（这是用户最可能的误解）')
-  assert.match(BLOCK_FALLBACK_TEXT, /已自动重试多档并收窄了上下文/, '要说清系统已经做过什么')
-  assert.match(BLOCK_FALLBACK_TEXT, /开一个新会话/, '要给出最有效的一步')
+  assert.match(BLOCK_FALLBACK_TEXT, /会话上下文/, '要说清触发点在哪')
+  assert.match(BLOCK_FALLBACK_TEXT, /不在本机/, '要明确排除本机故障（这是用户最可能的误解）')
+  assert.match(BLOCK_FALLBACK_TEXT, /已自动重试 7 档/, '要说清系统已经做过什么')
+  assert.match(BLOCK_FALLBACK_TEXT, /一个字节自家文本都不带/, '要说清试过"裸奔"这个对照')
+  assert.match(BLOCK_FALLBACK_TEXT, /换服务端会话号/, '要说清试过换会话号（v1.8.2 的最后一个杠杆）')
+  assert.match(BLOCK_FALLBACK_TEXT, /新建对话/, '要给出最有效的一步')
   // 旧文案的毛病：读起来像来路不明的第三方在推卸责任
   assert.ok(!BLOCK_FALLBACK_TEXT.includes('本地上游网关'), '不得再出现"本地上游网关"这种来路不明的说法')
 }
