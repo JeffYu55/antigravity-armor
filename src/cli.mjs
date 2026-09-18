@@ -15,6 +15,7 @@ import { log } from './log.mjs'
 import { upstreamWarning, scanUpstream } from './diag/upstream.mjs'
 import { probeLanguageServers } from './diag/ls.mjs'
 import { netcheck } from './diag/net.mjs'
+import { readClash, assessRouting } from './diag/clash.mjs'
 
 const argv = process.argv.slice(2)
 const cmd = argv[0]
@@ -215,6 +216,25 @@ async function netcheckCmd() {
   const a = r.assessment
   console.log('\n判读: ' + (a.ok ? '✅ ' : '⚠ ') + a.verdict)
   for (const h of a.hints) console.log('  ' + h)
+
+  // 路由实况：谁在真正承载流量？（"节点写着德国却走了日本"这类问题在这一段定案）
+  const c = await readClash({ timeoutMs: 3000 })
+  console.log('\n路由实况（问 Clash 自己）')
+  if (!c.ok) {
+    console.log('  ' + c.reason)
+  } else {
+    console.log('  接口: ' + c.via)
+    for (const g of c.groups) console.log('  ' + g.name.padEnd(10) + ' [' + g.type + ']  now = ' + g.now)
+    if (c.nodes.length) console.log('  节点: ' + c.nodes.map((n) => n.name + (n.delay != null ? '(' + n.delay + 'ms)' : '')).join('  '))
+    const routing = assessRouting({ groups: c.groups, connections: c.connections, exitCountry: (r.geo && r.geo.countryCode) || null })
+    const gconn = c.connections.filter((x) => /googleapis|google\.com|cloudcode/i.test(String(x.host)))
+    if (gconn.length) {
+      console.log('  Google 类流量实际链路:')
+      for (const x of gconn.slice(0, 4)) console.log('    ' + String(x.host).slice(0, 42).padEnd(44) + ' → ' + JSON.stringify(x.chains))
+    } else console.log('  （当前没有 Google 类活连接）')
+    console.log('  → 真正承载: ' + (routing.nodeName || '(未知)'))
+    for (const w of routing.warns) console.log('  ' + w)
+  }
   for (const e of r.errors) console.log('  (取数失败: ' + e + ')')
   console.log('')
 }

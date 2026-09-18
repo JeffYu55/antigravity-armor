@@ -256,6 +256,35 @@ ASN : AS20473 The Constant Company, LLC   [hosting/datacenter]
 
 `设置 HTTPS_PROXY` 的机器可以直接 `netcheck`；也可 `--proxy=http://127.0.0.1:PORT` 指定。
 
+### 4d.1 「节点是德国的，为什么走到了日本」
+
+`netcheck` 末尾的**路由实况**段直接问 Clash 自己（mihomo 的控制接口在 Windows 上挂在
+named pipe `\\.\pipe\verge-mihomo`）：
+
+```
+路由实况（问 Clash 自己）
+  接口: pipe \\.\pipe\verge-mihomo
+  AUTO       [URLTest]  now = onlinespace-hy2
+  PROXY      [Selector]  now = AUTO
+  Google 类流量实际链路:
+    accounts.google.com     → ["onlinespace-hy2","AUTO","PROXY"]
+  → 真正承载: onlinespace-hy2
+  ⚠ 主组「PROXY」挂在**自动测速组**「AUTO」上 → 你在界面上手选的节点**不生效**，
+    走哪个国家由自动测速决定。修法：点「PROXY」组，选**具体节点**（不要选 AUTO）。
+```
+
+`PROXY[Selector].now = AUTO` 就是说：主组把决定权交给了 `AUTO[URLTest]`。
+**url-test 组会挑延迟最低的节点**，所以「你选的德国」只是组内一个待选项，字面意义上没生效。
+从国内看日本东京延迟最低 → 走了日本。
+
+两条铁律：
+1. **主组必须选具体节点，不能选自动测速组** —— 否则任何"选国家"的操作都是心理安慰。
+2. **节点标称地区 ≠ 实际落地地区** —— 中转/专线节点的入口与落地是两台机器。
+   `netcheck` 会把「节点名写 DE」与「实测出口 JP」摆在一起对比，不一致直接点名。
+
+> 判读误报是比不报更坏的事：`extractRegion` 只认**旗子 emoji、独立 token 上的国家码
+> （`JP01` / `sg-02`）、整词地名**，`onlinespace-hy2` 里的 `nl` 不会被当成荷兰 —— 这条有测试锁死。
+
 `ls` 行现在以**真实进程**为准（`running ×N，其中 M 个指向 divert`）；若显示 `未指向 divert`，
 说明 L4 补丁被 IDE 更新覆盖了，跑 `node src/cli.mjs install --layer=ide --apply` 打回。
 | L5 端到端 | 见下一节 | blocked=false 且回复有实质内容 |
@@ -610,3 +639,4 @@ Get-CimInstance Win32_Process -Filter "Name='language_server.exe'" |
 | 2026-09-18 | 1.7.5 | 故障三分法：`PASS-AUTH`/`PASS-QUOTA` 日志 + `status` 上游健康判读（只看最后一次 200 之后）+ `ls` 行改以真实进程为准（`running ×N，其中 M 个指向 divert`）；173 单测 |
 | 2026-09-18 | 1.7.6 | 账号接口不再隐形：divert 回退分支记 `PASS-RELAY`；`PASS-AUTH` 对账号 lane 也生效；令牌体检 `AUTH-INFO`（永不含令牌）+ 可选 tokeninfo 鉴定（默认关闭）；180 单测 |
 | 2026-09-18 | 1.7.7 | 出口体检 `aarmor netcheck`：链路（Node 不读系统代理 → divert 可能直连）与出口信誉（机房 ASN / 受限地区）分开判读；§4d；190 单测 |
+| 2026-09-18 | 1.7.8 | 路由实况：直接问 mihomo（named pipe + 解 chunked）报告策略组当前选择与 Google 类流量的实际链路 →「手选节点不生效（主组挂 AUTO）」与「标称地区≠落地地区」两条判读；§4d.1；201 单测 |

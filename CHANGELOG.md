@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.7.8 — 「节点是德国的，为什么走到了日本」：手选的节点根本没生效
+
+主题：用户提问「clash 的节点是德国的，为什么走到了日本」。问 Clash 自己（mihomo 的
+named pipe 控制接口），答案一句话：
+
+```
+PROXY     [Selector]  now = AUTO              <- 主组挂在 AUTO 上，不是某个具体节点
+AUTO      [URLTest]   now = onlinespace-hy2   <- AUTO 自动测速挑，谁快走谁
+accounts.google.com  chain=["onlinespace-hy2","AUTO","PROXY"]
+```
+
+**当主组挂在 `url-test` 自动测速组上时，你在界面上手选的节点完全不生效** ——
+走哪个国家由自动测速决定。从国内看日本东京往往延迟最低，于是「选了德国却走了日本」。
+（实测该订阅 `tolerance: 80` + `lazy: true`，AUTO 组每 300s 换一次。）
+
+### 新增
+
+- `aarmor netcheck` 增加「**路由实况**」段：直接问 mihomo（Windows 上控制接口挂在
+  named pipe `\\.\pipe\verge-mihomo`，需解 chunked 响应），打印每个策略组的
+  `type` 与当前 `now`、节点延迟、以及 **Google 类流量的实际链路 `chains`**。
+- `src/diag/clash.mjs`：`httpOverPipe` / `dechunk` / `readClash` / `assessRouting` / `extractRegion`。
+  判读两条：
+  1. **主组是否挂在自动测速组上** → 是则明确说「你手选的节点不生效」并给出修法；
+  2. **节点标称地区 vs 实测出口国家** → 不一致则点名（中转/专线节点的入口与落地不是同一台机器）。
+- `test/clash.test.mjs` —— 12 条，含两条实测教训锁死：
+  - `onlinespace-hy2` 里的 `nl` **不能**被当成荷兰（误报比不报更坏：会让人去改没问题的设置）；
+  - 手选真正生效时**不得**告警（否则会把噪音当信号）。
+
 ## v1.7.7 — 「not available in your location」不是破甲问题，是出口 IP 的信誉问题
 
 主题：用户看到 IDE 报
