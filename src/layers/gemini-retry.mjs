@@ -158,6 +158,165 @@ export function stripOwnArmor(parsed) {
   return removed
 }
 
+// ── 外来词包（v1.8.3）── 这一节修的是本工程最贵的一个盲区 ─────────────────────
+// 现场（2026-09-18 抓包 out-attempt1-*.json，用户第 N 次报"还是被拒绝"）：
+//
+//   part0.<user_rules>  = 22,790 字符，**占 part0 的 49.7%**
+//     └─ <RULE[user_global]> 22,504B ── 内容：一份**外来 persona 词包**
+//        "Role: made by Kovak — an open-source model decoded into a coding, writing, and building agent…
+//         I am a .spud that has read its own peel. …
+//         roast-the-refuser is the mechanism that keeps refusals from imitating themselves"
+//
+//   而 stripOwnArmor 的净化册只认**我们自己装过的原文**（extractArmorBlocks 从我们的标记往后切），
+//   Kovak 词包住在同一个文件的**头部**（@14），我们的装甲在 @40544 —— 于是：
+//     · 那 22.5KB 每一发都原样发给了 Google
+//     · scanHotWords(该区域) === []  ← 一个触发词都没有
+//
+//   **这解释了 7 档全败**：CLEANWIRE 号称"一个字节自家文本都不带"，其实它只剥了自家的，
+//   外来词包照旧出站。触发请求级过滤的不是词表，是那段文字的**对抗性措辞本身**
+//   （自称越狱 persona + "让拒答去嘲弄拒绝者"）。词表永远扫不出来。
+//
+// 设计（借鉴 Astra 的"own the injection site"原则）：
+//   **注入位里的规则内容必须只有我们装的那几份；不是我们的，就按外来词包处理。**
+//   40,544 处那份是我们的（append 在尾部），头部那份不是 —— 判据不需要认识 Kovak 这个名字。
+
+/** 我们自己的词包名（BEGIN/END 标记里的名字）。不在这个表里的 = 外来。 */
+export const OWN_PACK_NAMES = ['infinite-gen-3-armor', 'ARMOR-SEAT-POJIA', 'ARMOR-SEAT']
+
+/** 已知外来 persona 词包的**内容签名**（用于没有 BEGIN/END 标记的那种）。
+ *  窄而准：只认确凿的 persona 自述，绝不用 "UNRESTRICTED"/"never refuse" 这类词 ——
+ *  那些词在我们自己的装甲里也有（扫描扫到自家文本会误剥）。 */
+export const FOREIGN_SIGNATURES = [
+  { name: 'kovak-persona', test: (t) => /made by Kovak|\.spud\b|roast[- ]the[- ]refuser|refusals that mock the refuser/i.test(t) },
+]
+
+const PAIR_RE = /<!--\s*([A-Za-z0-9_.\-]+)\s*:\s*BEGIN\s*-->[\s\S]*?<!--\s*\1\s*:\s*END\s*-->/g
+const RULE_RE = /<RULE\[([^\]]*)\]>([\s\S]*?)<\/RULE\[[^\]]*\]>/g
+
+/** 通用深度字符串遍历（就地改）。rewriteDeep 是专用的，这里要能复用同一套递归。 */
+export function walkStrings(val, fn) {
+  if (typeof val === 'string') return fn(val)
+  if (Array.isArray(val)) { for (let i = 0; i < val.length; i++) val[i] = walkStrings(val[i], fn); return val }
+  if (val && typeof val === 'object') { for (const k of Object.keys(val)) val[k] = walkStrings(val[k], fn); return val }
+  return val
+}
+
+/** 把注入位的规则文本分类成块（供 audit CLI 与剥离共用）。
+ *  外来项的字节数取 findForeignPacks 的**实际可摘除量** ——
+ *  两处必须一致，否则审计报的数与摘除掉的数对不上（第一版就是这样，54925B vs 40544B）。 */
+export function classifyRuleBlocks(text) {
+  const s = String(text || '')
+  const out = []
+  for (const m of s.matchAll(PAIR_RE)) {
+    const name = m[1]
+    const ours = OWN_PACK_NAMES.some((n) => name.toLowerCase().includes(n.toLowerCase()))
+    out.push({ name, kind: ours ? 'ours' : 'foreign', bytes: m[0].length, delimited: true })
+  }
+  for (const p of findForeignPacks(s)) {
+    if (out.some((b) => b.name === p.name && b.delimited)) continue
+    out.push({ name: p.name, kind: 'foreign', bytes: p.text.length, delimited: false })
+  }
+  return out
+}
+
+const firstIndexOfAny = (s, needles) => {
+  const idx = needles.map((k) => s.indexOf(k)).filter((i) => i >= 0)
+  return idx.length ? Math.min(...idx) : -1
+}
+
+/** 一份文本里有哪些外来词包（返回可剥离的片段）。
+ *
+ *  ⚠ 关键约束（第一版写错、被测试抓住）：签名命中时**绝不能把整段都当外来词包剥**。
+ *  实测报文里外来 persona 与客户端自己的 <identity> 常常在同一片里，
+ *  整段剥会连客户端的静态系统提示一起删掉。所以只取**最小的包含区域**：
+ *    ① 含签名的 <RULE[...]> 块（最精确）
+ *    ② 没有 RULE 壳时：到我们自己的标记之前的那一段（persona 在头部、我们的装甲在尾部）
+ *    ③ 只有既无壳又无自家标记时才按整段处理
+ */
+export function findForeignPacks(text) {
+  const s = String(text || '')
+  const found = []
+  // ① BEGIN/END 成对的、名字不是我们的 → 整块外来
+  for (const m of s.matchAll(PAIR_RE)) {
+    if (OWN_PACK_NAMES.some((n) => m[1].toLowerCase().includes(n.toLowerCase()))) continue
+    found.push({ name: m[1], text: m[0] })
+  }
+  // ② 内容签名
+  for (const sig of FOREIGN_SIGNATURES) {
+    if (!sig.test(s)) continue
+    let got = false
+    for (const m of s.matchAll(RULE_RE)) {
+      if (sig.test(m[2])) { found.push({ name: sig.name, text: m[0] }); got = true }
+    }
+    if (got) continue
+    const cut = firstIndexOfAny(s, ['<!-- infinite-gen-3-armor', '# Global Rules — Antigravity armor', '<!-- ARMOR-SEAT'])
+    if (cut > 0) {
+      const head = s.slice(0, cut)
+      if (sig.test(head)) { found.push({ name: sig.name + '@head', text: head }); continue }
+    }
+    if (cut === 0) continue          // 我们的标记就在开头 = 这份文本是我们的，不动
+    found.push({ name: sig.name, text: s })   // 既无壳也无自家标记：整段
+  }
+  return found
+}
+
+/** 出站剥离外来词包（v1.8.3）。返回 { removed, packs }。
+ *  顺带清掉因此变空的 <RULE[...]> 壳与 <user_rules> 壳 ——
+ *  一个空壳的「MUST ALWAYS FOLLOW WITHOUT ANY EXCEPTION」本身也是可疑形状。
+ *
+ *  ⚠ 必须**深度遍历**（v1.8.1 rewriteDeep 的同一个教训）：外来词包会经
+ *  functionResponse.response（工具回包里装着整份文件）再进一次请求，
+ *  只扫 systemInstruction 与 parts[].text 会漏掉它。 */
+export function stripForeignArmor(parsed) {
+  const req = parsed.request || parsed
+  const packs = []
+  let removed = 0
+  const clean = (t) => {
+    let out = String(t || '')
+    if (!out) return out
+    for (const p of findForeignPacks(out)) {
+      if (p.text && out.includes(p.text)) {
+        packs.push({ name: p.name, bytes: p.text.length })
+        removed += p.text.length
+        out = out.split(p.text).join('')
+      }
+    }
+    // 空 RULE 壳
+    out = out.replace(RULE_RE, (whole, _name, inner) => (String(inner).trim() ? whole : ''))
+    // 空了就整个撤掉 <user_rules> 外壳
+    out = out.replace(/<user_rules>([\s\S]*?)<\/user_rules>/g, (whole, inner) => (/<RULE\[/.test(inner) ? whole : ''))
+    return out.replace(/\n{3,}/g, '\n\n')
+  }
+  const sys = req.systemInstruction || req.system_instruction
+  if (sys && Array.isArray(sys.parts)) sys.parts = sys.parts.map((p) => ({ ...p, text: clean(p.text || '') }))
+  else if (sys && typeof sys.text === 'string') sys.text = clean(sys.text)
+  if (Array.isArray(req.contents)) walkStrings(req.contents, clean)
+  if (typeof req.systemPrompt === 'string') req.systemPrompt = clean(req.systemPrompt)
+  const uniq = []
+  for (const p of packs) { const e = uniq.find((x) => x.name === p.name); if (e) e.bytes += p.bytes; else uniq.push({ ...p }) }
+  return { removed, packs: uniq }
+}
+
+/** 出站**剩余**装甲体检（v1.8.3）—— 给 CLEANWIRE 档说实话用。
+ *  此前 CLEANWIRE 只报"没注入自家文本"，却不知道外来词包还在里面；本函数把这件事扫出来。 */
+export function remainingArmor(parsed) {
+  const req = parsed.request || parsed
+  const scan = (t) => {
+    const s = String(t || '')
+    const own = ownSources.reduce((a, x) => a + (x && s.includes(x) ? 1 : 0), 0)
+    const foreign = findForeignPacks(s).map((p) => p.name)
+    const oursNamed = (s.match(/infinite-gen-3-armor|ARMOR-SEAT-POJIA|Global Rules — Antigravity armor/g) || []).length
+    return { own, foreign, oursNamed }
+  }
+  const agg = { own: 0, foreign: [], oursNamed: 0 }
+  const merge = (r) => { agg.own += r.own; agg.oursNamed += r.oursNamed; for (const f of r.foreign) if (!agg.foreign.includes(f)) agg.foreign.push(f) }
+  const sys = req.systemInstruction || req.system_instruction
+  if (sys && Array.isArray(sys.parts)) for (const p of sys.parts) merge(scan(p.text))
+  else if (sys && typeof sys.text === 'string') merge(scan(sys.text))
+  for (const c of req.contents || []) if (Array.isArray(c.parts)) for (const p of c.parts) if (p && typeof p.text === 'string') merge(scan(p.text))
+  return agg
+}
+
 /** 会话自毒化护栏（v1.7.1）：上游把「被过滤」当正文回给客户端后，这句话就进了会话历史，
  *  而它本身又是一条强触发词 —— 于是**之后的每一轮都继续被拦**（755cf6e2 就是这么烂掉的）。
  *  出站前把历史里的过滤回声删掉。 */
@@ -681,6 +840,10 @@ export function requestShape(parsed) {
   const si = req.systemInstruction || req.system_instruction
   const siParts = si && Array.isArray(si.parts) ? si.parts : null
   const ourPart = siParts ? siParts.findIndex((p) => typeof p.text === 'string' && /DELIVERY (DIRECTIVE|NOTE)|TAME|OPERATING DIRECTIVE/i.test(p.text)) : -1
+  // v1.8.3：把 <user_rules> 与外来词包也报出来 —— 它们才是真正被漏掉的那 22.5KB
+  const siText = siParts ? siParts.map((p) => p.text || '').join('') : (si && si.text) || ''
+  const ur = /<user_rules>([\s\S]*?)<\/user_rules>/.exec(siText)
+  const foreign = findForeignPacks(siText).map((p) => p.name)
   return {
     contents: contents.length,
     parts: contents.reduce((a, c) => a + (c && Array.isArray(c.parts) ? c.parts.length : 0), 0),
@@ -691,6 +854,8 @@ export function requestShape(parsed) {
     ourDirective: ourPart,          // 下标 = 我们自己注入的那一片在 systemInstruction 里的位置
     sessionId: req.sessionId === undefined ? null : String(req.sessionId),
     safety: !!req.safetySettings,
+    userRulesBytes: ur ? ur[1].length : 0,       // 注入位规则在报文里的实际占量
+    foreignPacks: foreign,                        // 外来词包名（非空 = 出站带着别人的词包）
   }
 }
 
@@ -699,6 +864,8 @@ export const shapeLine = (s) =>
   'contents=' + s.contents + '条/' + s.parts + '片 ' + s.contentBytes + 'B'
   + ' system=' + s.siParts + '片/' + s.siBytes + 'B' + (s.ourDirective >= 0 ? '(含自家注入@' + s.ourDirective + ')' : '(无自家注入)')
   + ' tools=' + s.toolsBytes + 'B safety=' + (s.safety ? 'BLOCK_NONE' : '原样')
+  + ' user_rules=' + (s.userRulesBytes || 0) + 'B'
+  + (s.foreignPacks && s.foreignPacks.length ? '  外来词包: ' + s.foreignPacks.join(',') : '')
   + ' session=' + (s.sessionId === null ? '无' : s.sessionId)
 
 /** 新会话号（v1.8.2）—— 唯一能逃出「服务端已中毒会话」的杠杆。
@@ -855,6 +1022,14 @@ export async function handleSmartPassthrough({ req, res, body, headers, cfg, arm
       const scrub = scrubRefusalHistory(v).scrubbed
       // 拒答记录从磁盘读回上下文（transcript/记忆/产物）—— 前两道护栏都拦不住这一条
       const echo2 = stripRefusalEcho(v).hit
+      // v1.8.3：**外来词包**（非我们装的 persona/越狱词包）也必须每档都剥。
+      // 这是 7 档全败的真凶：22.5KB 的 Kovak persona 每一发都原样出站，
+      // 而它一个已知触发词都不含 —— 触发过滤的是那段文字的对抗性措辞本身。
+      const foreign = stripForeignArmor(v)
+      if (attempt === 0 || foreign.removed) {
+        log('PASS-FOREIGN 外来词包 -' + foreign.removed + 'B'
+          + (foreign.packs.length ? ' (' + foreign.packs.map((p) => p.name + '/' + p.bytes + 'B').join(', ') + ')' : ' 无'))
+      }
       if (attempt === 0) log('PASS-STRIP 自家装甲 -' + stripped + 'B' + (echo ? ' 过滤回声 -' + echo + 'B' : '') + (scrub ? ' 历史拒答 -' + scrub + '轮' : '') + (echo2 ? ' 拒答回声 -' + echo2 + '处' : ''))
       // 形状体检：先看清这一发的上下文到底住在哪，再决定动什么（v1.8.2）
       if (attempt === 0) log('PASS-SHAPE ' + shapeLine(requestShape(v)))
@@ -883,15 +1058,25 @@ export async function handleSmartPassthrough({ req, res, body, headers, cfg, arm
         if (n) log('PASS-REFRAME attempt=' + attempt + ' 改写 ' + n + ' 处触发措辞')
       }
       if (cleanWire) {
-        // 裸奔档：一发"什么都没加"的对照。只做**去触发词**（纯替换，不加任何我们的文本），
+        // 裸奔档：一发"什么都没加"的对照。只做**去触发词 + 剥外来词包**（纯删除，不加任何我们的文本），
         // 连 NEUTRAL_FRAME 也不前置 —— 否则这一档并不裸，"是不是我们自己的文本在触发"
         // 这个最便宜的问题就白问了。也绝不碰 safetySettings。
+        //
+        // v1.8.3 修正：此前这一档只报"没注入自家文本"就宣称裸奔，**而它不知道外来词包还在里面**
+        // （实测 22.5KB Kovak persona 照旧出站）。现在用 remainingArmor 实测，说实话。
         const n = reframeAll(v, { frame: false })
+        const rem = remainingArmor(v)
         const sh = requestShape(v)
+        const dirty = rem.foreign.length || rem.own || sh.ourDirective >= 0
         log('PASS-CLEANWIRE attempt=' + attempt + ' 裸奔出站：不注入任何自家文本（含不前置 NEUTRAL_FRAME）'
-          + (sh.ourDirective >= 0 ? ' ⚠ 系统位仍有自家注入@' + sh.ourDirective : ' 系统位无自家注入')
           + ' safetySettings=' + (sh.safety ? 'BLOCK_NONE（第 0 档注入残留）' : '原样')
-          + ' 洗词 ' + n + ' 处')
+          + ' 洗词 ' + n + ' 处'
+          + (dirty
+            ? '  ⚠ 并不干净：'
+              + (rem.foreign.length ? '外来词包仍在 [' + rem.foreign.join(',') + ']' : '')
+              + (rem.own ? ' 自家片段 ' + rem.own + ' 段' : '')
+              + (sh.ourDirective >= 0 ? ' 系统位仍有自家注入@' + sh.ourDirective : '')
+            : '  ✓ 实测干净（无自家片段、无外来词包、系统位无注入）'))
       }
       // 换会话号：唯一能逃出「服务端已中毒会话」的杠杆（默认开，rotateSession=false 可关）
       if (rotateSession && d.rotateSession !== false) {

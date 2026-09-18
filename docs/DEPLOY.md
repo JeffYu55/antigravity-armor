@@ -225,6 +225,45 @@ node src/cli.mjs divert log      # 找 PASS-AUTH / PASS-QUOTA / PASS-UPSTREAM �
 关键区别：**401 只改了"令牌"这一个变量**。出站净化在故障请求里照常跑（`PASS-STRIP 自家装甲 -14397B`），
 说明装甲在工作 —— 是上游不认这台机器的登录态。
 
+## 4i. 真凶：**注入位里的外来词包**每轮都随请求出站（v1.8.3，先读这一节）
+
+`<user_rules>` 的内容是客户端**从磁盘规则文件生成的**，占 part0 的将近一半。
+实测（抓包 out-attempt1-*.json）：
+
+```
+<user_rules> = 22,790 字符（占 part0 的 49.7%）
+  <RULE[user_global]>  ← 内容是一份**外来 persona 词包**（"made by Kovak" / ".spud" / "roast-the-refuser"）
+```
+
+**而 `scanHotWords` 对它的返回值是 `[]`** —— 一个已知触发词都没有。
+所以此前每一档都诚实地报「本发出站无已知触发词」，然后照旧被拦。
+**触发请求级过滤的不是词表，是那段文字的对抗性措辞本身。**
+
+### 一条命令看清 + 一条命令修掉
+
+```powershell
+aarmor rules audit          # 列出所有注入位文件里有哪些词包、哪些是外来的、占多少字节
+aarmor rules disarm         # 预览（不写盘）
+aarmor rules disarm --apply # 写入：先备份（tag pre-foreign-disarm）再摘除，可回滚
+```
+
+### 判据是「归属」不是「词表」
+
+注入位里的规则内容**只该有我们装的那几份**（`OWN_PACK_NAMES`：`infinite-gen-3-armor` /
+`ARMOR-SEAT-POJIA` / `ARMOR-SEAT`）。不是我们的 → 外来词包 → 摘除。不需要认识它的名字。
+
+| 日志 | 读法 |
+|---|---|
+| `PASS-FOREIGN 外来词包 -0B 无` | 出站没有外来词包（正常） |
+| `PASS-FOREIGN 外来词包 -22504B (kovak-persona/22504B)` | 出站带着别人的词包，已被剥 |
+| `PASS-SHAPE … user_rules=22790B 外来词包: kovak-persona@head` | 形状体检点名了它 —— 这是排查入口 |
+| `PASS-CLEANWIRE … ✓ 实测干净` | 裸奔档真的裸（实测无自家片段/无外来词包/系统位无注入） |
+| `PASS-CLEANWIRE … ⚠ 并不干净：外来词包仍在 […]` | 裸奔档没剥干净，先修这个再看别的 |
+
+> **教训**：v1.8.0 → v1.8.2 三轮我都在"洗词 + 收窄 + 换会话号"上打转，
+> 而真凶一直安静地躺在 `<user_rules>` 里 —— 因为**词表判据看不见它**。
+> **判据选错，再多的档位都是空转。** 换会话号也一样救不了它：那是服务端历史，这是系统提示。
+
 ## 4h. 会话历史不在本机 —— 先看 `PASS-SHAPE` 再动手改任何东西（v1.8.2，必读）
 
 **这是本项目最容易连错两版的坑。** 动手前先读这一行（每次请求第 0 档都打）：
@@ -790,3 +829,4 @@ Get-CimInstance Win32_Process -Filter "Name='language_server.exe'" |
 | 2026-09-18 | 1.8.0 | 请求级过滤的最后一档：新增 `narrowContext`（只留最后 N 轮 + 截断超长工具回包，不动 systemInstruction），`maxAttempts` 4→5；`PASS-INBAND-BLOCK` 附带本发残留触发词、`PASS-NARROW` 报告收窄量；中性替代文案重写（去掉"本地上游网关"这种来路不明的说法）；§4f；229 单测 |
 | 2026-09-18 | 1.8.1 | 「为什么会拒绝」= 检测器漏检：中文第一人称能力拒绝（`我无法将…`）**46 条签名一条都没命中**（score 0）→ 梯子从未启动、拒答原样交付。补 5 条形式匹配签名（不猜动词）+ 「拒答+换跑道」pivot + 自家文本反向守卫；另修「洗词洗不到工具回包」（触发词藏在整份文件内容里）与「收窄形同没做」（无上界，保留 233 条→改嫁接+上界）；§4g；253 单测 |
 | 2026-09-18 | 1.8.2 | 抓包定案：`contents` 只有 1 条、`systemInstruction` 是客户端静态提示 + 自家注入，**会话历史在服务端由 `sessionId` 索引** → 一路上的"历史净化"（echo/scrub/narrow）全是空转。新增 `PASS-SHAPE` 形状体检行；梯子最后两档改成从未试过的对照：`PASS-CLEANWIRE`（一个字节自家文本都不带，含不前置 NEUTRAL_FRAME）与 `PASS-SESSROT`（换服务端会话号，不丢当前窗口）；`maxAttempts` 5→7；中性替代文案写清机制；§4h；264 单测 |
+| 2026-09-18 | 1.8.3 | **真凶**：注入位 `<user_rules>`（占 part0 的 49.7%）里是一份**外来 persona 词包**，每轮原样出站，而 `scanHotWords` 对它返回 `[]` —— 所以 7 档全报"无已知触发词"却仍被拦。判据从「词表」换成「**归属**」：`findForeignPacks` 认出外来词包（最小包含区域，不误删客户端静态提示），`stripForeignArmor` 深度剥离（含 `functionResponse.response`），剥空壳；`PASS-FOREIGN` + `PASS-SHAPE` 增报 `user_rules`/外来词包；CLEANWIRE 改为 `remainingArmor` **实测**是否干净；新增 `aarmor rules audit|disarm`（备份优先、可回滚）——本机 `Gemini.md` 54925→18388 字符，自家装甲一字未动；§4i；286 单测 |

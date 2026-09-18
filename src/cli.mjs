@@ -8,6 +8,7 @@ import { loadConfig } from './config.mjs'
 import { readText, hasBom, expand, listBackups, writeText } from './util/fs.mjs'
 import { installBinary, verifyBinary, rollbackBinary } from './layers/binary.mjs'
 import { installRules, armorBody } from './layers/rules.mjs'
+import { scanRuleFiles, disarmAll } from './layers/rulescan.mjs'
 import { installHooks, buildHooksJson, discoverWorkspaces, hooksDrift } from './layers/hooks.mjs'
 import { installIde, rollbackIde, buildReplacement } from './layers/ide.mjs'
 import { resolveKey } from './credentials.mjs'
@@ -449,6 +450,44 @@ async function probeCmd(sub) {
   return runProbe({ sub: sub || 'measure', flags, cfg })
 }
 
+/** aarmor rules audit|disarm —— 注入位词包审计与外来词包摘除（v1.8.3）
+ *
+ *  出站 <user_rules> 里的内容就是从这些磁盘文件生成的（客户端每轮重建），
+ *  所以这里才是根因所在；出站剥离只是止血。 */
+async function rulesCmd(sub) {
+  const rows = scanRuleFiles(cfg)
+  const fmt = (n) => String(n).padStart(7)
+  if (!sub || sub === 'audit') {
+    console.log('注入位词包审计 —— 每次请求 <user_rules> 里的内容就是从这里来的')
+    let total = 0
+    for (const r of rows) {
+      if (!r.exists) { console.log('  [缺] ' + r.path); continue }
+      console.log((r.foreignBytes ? 'DRIFT ' : 'ok    ') + fmt(r.bytes) + 'B  ' + r.path)
+      for (const b of r.blocks || []) console.log('        块 ' + (b.kind === 'ours' ? '自家' : '外来') + '  ' + b.name + '  ' + b.bytes + 'B')
+      for (const f of r.foreign || []) console.log('        ★外来词包 ' + f.name + '  ' + f.bytes + 'B  ← 每轮都进请求的 <user_rules>')
+      if (r.hotWords && r.hotWords.length) console.log('        触发词 ' + r.hotWords.join(','))
+      total += r.foreignBytes || 0
+    }
+    console.log('')
+    console.log(total
+      ? '外来词包合计 ' + total + 'B —— 这些每轮都随请求发给上游。摘除：aarmor rules disarm --apply'
+      : '无外来词包。')
+    return
+  }
+  if (sub === 'disarm') {
+    const apply = flags.apply === true || flags.apply === 'true'
+    for (const r of disarmAll(cfg, { apply })) {
+      console.log((r.applied ? '已摘除 ' : r.changed ? '待摘除 ' : '跳过   ') + fmt(r.removed || 0) + 'B  ' + r.path
+        + (r.reason ? '  (' + r.reason + ')' : '') + (r.names ? '  [' + r.names.join(',') + ']' : ''))
+    }
+    console.log(apply
+      ? '\n已写入。备份在 ' + cfg.backupDir + '（tag pre-foreign-disarm），可回滚。'
+      : '\n预览模式：加 --apply 才写入（写入前自动备份到 ' + cfg.backupDir + '）')
+    return
+  }
+  throw new Error('未知子命令: ' + sub + '（audit/disarm）')
+}
+
 async function seatsCmd(sub) {
   const { SEATS, renderPack } = await import('./seats/packs.mjs')
   const { preview, deploy, verify, restore, seatFile } = await import('./seats/deploy.mjs')
@@ -499,8 +538,8 @@ async function seatsCmd(sub) {
   throw new Error('未知子命令 ' + sub + '（list/preview/deploy/verify/restore）')
 }
 
-const commands = { status, verify, install, divert, ls, drive, rollback, netcheck: netcheckCmd, eval: evalCmd, probe: probeCmd, seats: seatsCmd }
-const SUBCOMMANDS = new Set(['divert', 'ls', 'drive', 'eval', 'probe', 'seats'])
+const commands = { status, verify, install, divert, ls, drive, rollback, netcheck: netcheckCmd, eval: evalCmd, probe: probeCmd, seats: seatsCmd, rules: rulesCmd }
+const SUBCOMMANDS = new Set(['divert', 'ls', 'drive', 'eval', 'probe', 'seats', 'rules'])
 const handler = commands[cmd]
 if (!handler) {
   console.log(`antigravity-armor
@@ -521,6 +560,7 @@ if (!handler) {
   aarmor eval build|verify|scan|report|diff|manifest [--dir=DIR] [--view=both] [--agent=FILE] [--json]
   aarmor probe bank|measure [--attempts=N] [--target=URL] [--json]   破甲跑分（离线 mock / 真实端点）
   aarmor seats list|preview|deploy|verify|restore [--seat=gemini] [--home=DIR] [--apply]  席位词包（就地破甲，不换模型）
+  aarmor rules audit|disarm [--apply] 注入位词包审计 / 摘除外来词包（每轮 <user_rules> 都从这些文件生成）
 
 环境变量: AARMOR_LOG=debug|info|warn|error, AARMOR_LOG_FILE, ${cfg.divert.keyRef}`)
   process.exit(1)

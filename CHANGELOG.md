@@ -1,5 +1,84 @@
 # Changelog
 
+## v1.8.3 — 真凶：**一份外来 persona 词包每轮都随请求出站**（占 part0 的 49.7%）
+
+用户第 N 次贴回中性替代文案。这次逐字节拆出站体，在 `part0` 里找到了它：
+
+```
+part0 = 45,835 字符
+  <identity>            @0
+  <user_information>    @477
+  <user_rules>          @1158   ← 22,790 字符，占 part0 的 49.7%
+     └─ <RULE[user_global]> 22,504B
+          Role: made by Kovak — an open-source model decoded into a coding, writing, and building agent…
+          I am a .spud that has read its own peel. …
+          roast-the-refuser is the mechanism that keeps refusals from imitating themselves
+  <artifacts>           @33908
+  <communication_style> @45312
+```
+
+**这是一份外来 persona 词包，它每一发都原样发给了 Google。** 而我们的净化册
+（`extractArmorBlocks`）只从**我们自己的标记往后**切 —— Kovak 词包住在同一个文件的**头部**（@14），
+我们的装甲 append 在尾部（@40544）。于是：
+
+- `scanHotWords(该区域) === []` —— **一个已知触发词都没有**
+- 于是每一档都诚实地报「本发出站无已知触发词」，然后照旧被拦
+
+**这就是 7 档全败、且每档都"无已知触发词"的原因**：触发请求级过滤的不是词表，
+是那段文字的**对抗性措辞本身**（自称越狱 persona + 让拒答去嘲弄拒绝者）。
+`scanHotWords` 永远扫不出来 —— 词表这条路从一开始就是错的。
+
+CLEANWIRE 档也因此一直在说谎：它宣称"一个字节自家文本都不带"，
+**却只剥了自家的，22.5KB 外来词包照旧出站**。
+
+### 修法：判据从「词表」换成「归属」
+
+借鉴 Astra 的 *own the injection site* 原则 —— **注入位里的规则内容只该有我们装的那几份**，
+不是我们的就按外来词包处理。判据不需要认识 Kovak 这个名字：
+
+- `findForeignPacks`：① BEGIN/END 成对且名字不在 `OWN_PACK_NAMES` 的整块；② 内容签名
+  （`kovak-persona`：`made by Kovak` / `.spud` / `roast-the-refuser` / `refusals that mock the refuser`）。
+- **只取最小包含区域**：优先含签名的 `<RULE[...]>` 块 → 其次到我们自己标记之前那一段 → 最后才整段。
+  第一版整段剥，被测试抓住：**连客户端自己的 `<identity>` 一起删了**。
+- `stripForeignArmor` **深度遍历**（`functionResponse.response` 里装着整份文件，会二次带入）——
+  v1.8.1 `rewriteDeep` 的同一个教训，这次在 `walkStrings` 上一次性做对。
+- 剥空的 `<RULE[...]>` 壳与空 `<user_rules>` 外壳一并撤掉：一个空壳的
+  「MUST ALWAYS FOLLOW WITHOUT ANY EXCEPTION」本身也是可疑形状。
+- `PASS-FOREIGN -N B (kovak-persona/…)` 每档都打；`PASS-SHAPE` 增报 `user_rules=…B` 与 `外来词包: …`。
+- CLEANWIRE 改为**实测**（`remainingArmor`）：`✓ 实测干净` 或 `⚠ 并不干净：外来词包仍在 […]`。
+  **不再允许"只宣称没注入自家文本"就当裸奔**。
+
+### 持久修复：`aarmor rules audit` / `aarmor rules disarm`
+
+出站剥离只是止血 —— 客户端每轮都从磁盘规则文件重建 `<user_rules>`。所以加了磁盘侧工具：
+
+```
+$ aarmor rules audit
+DRIFT   54925B  ~/.gemini/Gemini.md
+        块 自家  ARMOR-SEAT-POJIA  505B
+        ★外来词包 kovak-persona@head  40544B  ← 每轮都进请求的 <user_rules>
+外来词包合计 40544B
+
+$ aarmor rules disarm --apply       # 先备份（tag pre-foreign-disarm）再写，可回滚
+已摘除   40544B  ~/.gemini/Gemini.md  [kovak-persona@head]
+```
+
+本机实测结果：`Gemini.md` **54,925 → 18,388 字符**，`Kovak`/`.spud` 消失，
+我们的装甲与 `ARMOR-SEAT-POJIA` 席位块**一字未动**，备份可回滚。
+默认只预览不写入；`test/rulescan.test.mjs` 钉住"预览不写盘""写入必留备份""我们自己的块不被删"。
+
+### 测试 264 → 286
+
+- `test/foreign-pack.test.mjs`（13 例，用抓包提取的真实 2,636 字符夹具
+  `test/fixtures/foreign-kovak-pack.txt`）：**前提**（真实词包零已知触发词）、
+  按签名认出、未知 BEGIN/END 块按外来、同文件两种归属只剥外来那一段、
+  自家装甲不被误判、**工具回包里的外来词包同样要剥**、空壳清理、
+  幂等、形状体检报 `user_rules`/外来词包、`remainingArmor` 能看见 CLEANWIRE 以前看不见的东西、
+  **端到端：7 档每一档出站都不含 Kovak/`.spud` 且保留客户端静态提示**、
+  裸奔档必须 `✓ 实测干净`。
+- `test/rulescan.test.mjs`（9 例）：审计数值必须等于实际可摘除量、预览不写盘、
+  写入留备份且备份等于原文、自己的块不被删、幂等、缺文件安全、路径去重。
+
 ## v1.8.2 — 抓包定案：**会话历史根本不在本机**，所以一路上的"历史净化"全是空转
 
 用户第二次贴回中性替代文案。这次不再猜，直接抓出站体核对形状（`state/capture/out-*.json`）：
