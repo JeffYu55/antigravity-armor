@@ -16,8 +16,12 @@ const MARKERS = ['锛', '鐨', '鈥', '鍙', '杩涘', '鏂囦', '鍑芥暟', '�
 const TEXT_EXT = /\.(md|mjs|js|json|ts|txt|yml|yaml|cmd|ps1)$/i
 
 function trackedTextFiles() {
+  // 跳过本文件：它必然包含 MARKERS 里的乱码字（那是它的数据），扫自己就是自指误报。
+  // 这个坑本机看不见 —— 本机跑时本文件还没进版本控制，git ls-files 不列它；
+  // 一旦提交进克隆，它就出现在列表里并把自己判红。**只有克隆验证能抓到这一条。**
+  const SELF = 'test/encoding.test.mjs'
   return execFileSync('git', ['ls-files'], { encoding: 'utf8', timeout: 30000 })
-    .split('\n').filter(Boolean).filter((f) => TEXT_EXT.test(f))
+    .split('\n').filter(Boolean).filter((f) => TEXT_EXT.test(f)).filter((f) => f !== SELF)
 }
 
 export function testNoTrackedFileContainsMojibakeMarkers() {
