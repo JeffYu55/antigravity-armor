@@ -11,6 +11,8 @@ import { join } from 'node:path'
 import { geminiToOpenAI, geminiEvent, createStreamAccumulator } from '../proto/convert.mjs'
 import { resolveKey } from '../credentials.mjs'
 import { log } from '../log.mjs'
+import { describeToken, tokenLine } from '../diag/token.mjs'
+import { probeToken, tokenInfoLine } from '../diag/tokeninfo.mjs'
 import { analyzeRefusal, analyzeDeliverable, gateDecision, escalationFor, ESCALATION_LADDER, ladderSummary, detectLang, PREFILL_ZH, requestText } from './refusal.mjs'
 import { handleSameModel, handleSmartPassthrough, setOwnArmorSources, collectOwnArmorSources, SAFE_DELIVERABLE_DIRECTIVE } from './gemini-retry.mjs'
 
@@ -310,6 +312,11 @@ export function createDivertServer(cfg, opts = {}) {
     req.on('end', () => {
       const body = Buffer.concat(chunks)
       req.url = stripPad(req.url)
+      // 令牌体检（v1.7.6）：401 的两种成因（令牌过期 vs 令牌新鲜但被拒）长得一样，
+      // 只报形态与有效期就能当场分开。永不打印令牌本身。
+      if (cfg.divert.authDiag !== false) {
+        try { say(tokenLine(describeToken(req.headers.authorization))) } catch {}
+      }
       if (req.url.includes('GenerateContent')) {
         // 同模型重试（v1.6.0）：原始模型重采样，装甲进 systemInstruction，仍然零换模型。
         if (cfg.divert.sameModel) {
@@ -341,7 +348,21 @@ export function createDivertServer(cfg, opts = {}) {
       const headers = { ...req.headers }
       delete headers.host; delete headers['content-length']
       const preq = https.request({ host: u.hostname, port: 443, method: req.method, path: req.url, headers: { ...headers, host: u.hostname, 'content-length': body.length } }, (pres) => {
-        res.writeHead(pres.statusCode || 502, pres.headers); pres.pipe(res)
+        // v1.7.6：这条回退分支是**账号接口**（loadCodeAssist / ListExperiments / onboardUser …）的必经之路，
+        // 以前转发完一个字都不记 —— 于是「账号一直在 401」在 divert 日志里完全隐形（实测 09:03–11:29 全空），
+        // 只能靠 IDE 自己的日志才发现。与「divert 全绿但代理已死」属于同一类盲点，必须记。
+        const code = pres.statusCode || 502
+        say('PASS-RELAY ' + code + ' ' + String(req.url).slice(0, 60))
+        if (code === 401 || code === 403) {
+          say('PASS-AUTH ' + code + ' 上游拒绝本机令牌 —— 账号登录态失效，不是破甲问题：在 Antigravity 里重新登录即可。')
+          // 可选鉴定：把「令牌过期/被撤销」与「令牌有效但请求被拒」分开（默认关闭，令牌永不落日志）
+          if (cfg.divert.tokenInfo === true || process.env.AARMOR_TOKENINFO === '1') {
+            probeToken(req.headers.authorization)
+              .then((r) => say(tokenInfoLine(r)))
+              .catch(() => {})
+          }
+        } else if (code === 429) say('PASS-QUOTA 429 上游额度用尽 —— 账号侧配额，不是链路问题。')
+        res.writeHead(code, pres.headers); pres.pipe(res)
       })
       preq.on('error', (e) => { say('PASS-ERR ' + e.message); if (!res.headersSent) res.writeHead(502); res.end('{}') })
       preq.end(body)

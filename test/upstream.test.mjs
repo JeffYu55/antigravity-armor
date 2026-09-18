@@ -55,6 +55,30 @@ export function testQuotaAndCapacityAreDistinguished() {
   assert.match(cap.hint, /换模型/)
 }
 
+export function testAccountLaneRelayIsCounted() {
+  // v1.7.6：账号接口走 divert 的回退分支，日志形态是 PASS-RELAY，不是 RELAY h2 ->
+  // 以前不认这种，于是「账号接口一直 401」在判读里完全隐形
+  const text = [
+    '11:00:00 RELAY h2 -> 200',
+    '11:01:00 PASS-RELAY 401 //v1internal:loadCodeAssist',
+    '11:02:00 PASS-RELAY 401 //v1internal:loadCodeAssist',
+  ].join('\n')
+  const r = scanUpstream(text)
+  assert.equal(r.verdict, 'auth')
+  assert.equal(r.tail.length, 2)
+  assert.ok(r.tail.every((e) => e.lane === 'account'), '必须标成账号车道')
+  const w = upstreamWarning(text)
+  assert.match(w.line, /2 次是\*\*账号接口\*\*/, '账号接口失败要点名：' + w.line)
+}
+
+export function testModelLaneIsLabelledSeparately() {
+  const text = ['12:00:00 RELAY h2 -> 200', '12:00:01 RELAY h2 -> 401'].join('\n')
+  const r = scanUpstream(text)
+  assert.equal(r.tail[0].lane, 'model')
+  const w = upstreamWarning(text)
+  assert.ok(!/账号接口/.test(w.line), '模型车道的失败不该被说成账号接口')
+}
+
 export function testNoDataIsSilent() {
   assert.equal(scanUpstream('').verdict, 'no-data')
   // 没有上游响应记录时不占画面：返回 null（status 里只在有问题时才多打一行）
