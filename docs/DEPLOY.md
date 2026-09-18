@@ -220,9 +220,38 @@ node src/cli.mjs divert log      # 找 PASS-AUTH / PASS-QUOTA / PASS-UPSTREAM �
 | **链路**（代理死） | `dial tcp 127.0.0.1:50100: connectex` | `divert start`（+ `autostart install`） |
 | **破甲**（真失效） | `PASS-GATE ... text=` 有正文却是拒答措辞；或 `PASS-REFUSAL` 反复触发 | 才轮到改装甲/规则 |
 | **地区**（ineligible / location） | IDE 报 `not currently available in your location` | `netcheck` 看出口信誉 —— 机房 IP 换节点，**不是破甲问题** |
+| **协议帧**（合成帧写错） | 中性替代文本显示出来了，紧接着 `Agent terminated due to error`；会话 DB 里是 `calling model: proto: syntax error (line 1:1): unexpected token [` | 上游过滤打到底时本机合成的替代帧形状不对，见 §4e（v1.7.9 已修） |
 
 关键区别：**401 只改了"令牌"这一个变量**。出站净化在故障请求里照常跑（`PASS-STRIP 自家装甲 -14397B`），
 说明装甲在工作 —— 是上游不认这台机器的登录态。
+
+## 4e. 两条车道的终止符不能互抄（v1.7.9，必读）
+
+看到 `PASS-INBAND-BLOCK 额度用尽 -> 中性替代` 之后**文本显示了却紧跟 `Agent terminated due to error`**，
+不要怀疑装甲 —— 那是本机合成帧的**协议形状**错了。会话 DB 里的原始错误是判据：
+
+```powershell
+# 会话 DB 里的原始错误（#517 那条）
+agent executor error: calling model: proto: syntax error (line 1:1): unexpected token [
+```
+
+`unexpected token [` 说明解析器撞上了 `[` —— 旧版 `neutralSse` 结尾写了 `data: [DONE]`。
+**`[DONE]` 是 OpenAI 的终止符，Google 的流里根本没有它**（`state/capture` 25/25 样本皆无）。
+客户端把每个 `data:` 载荷当 protobuf 解析，于是先显示文本、再当场崩。
+
+| 车道 | 协议 | 终止符 |
+|---|---|---|
+| Google 车道（`src/layers/*.mjs`） | Gemini SSE | **绝无 `[DONE]`**：STOP 帧 + `\r\n\r\n` + EOF |
+| OpenAI 车道（`src/probe/mock.mjs`、kuaipao） | OpenAI SSE | `data: [DONE]`（**正确**，别删） |
+
+合成帧必须与真实帧同形，三条不变量（`test/sse-shape.test.mjs` 以真实取证为基准锁死）：
+1. 帧界是 `\r\n\r\n`，不是裸 `\n\n`；
+2. 两帧：内容帧（无 `finishReason`）+ 收尾帧（`parts:[{text:""}]` + `finishReason:"STOP"`）；
+3. 顶层键恰好 `response / traceId / metadata`，且每帧带 `usageMetadata`。
+
+> 教训：**测"我发出去的东西"要用"上游真的发了什么"当基准，不能用"我以为它该长什么样"。**
+> 旧测试正是 `assert.ok(sse.includes('data: [DONE]'), '要有结束帧')` —— 这个 bug 就是被它锁死的。
+> 真实样本已落 `test/fixtures/real-sse-*.sse`。
 
 ## 4d. 出口体检（v1.7.7）—— 「流量没经过 Clash」要分两件事查
 
@@ -640,3 +669,4 @@ Get-CimInstance Win32_Process -Filter "Name='language_server.exe'" |
 | 2026-09-18 | 1.7.6 | 账号接口不再隐形：divert 回退分支记 `PASS-RELAY`；`PASS-AUTH` 对账号 lane 也生效；令牌体检 `AUTH-INFO`（永不含令牌）+ 可选 tokeninfo 鉴定（默认关闭）；180 单测 |
 | 2026-09-18 | 1.7.7 | 出口体检 `aarmor netcheck`：链路（Node 不读系统代理 → divert 可能直连）与出口信誉（机房 ASN / 受限地区）分开判读；§4d；190 单测 |
 | 2026-09-18 | 1.7.8 | 路由实况：直接问 mihomo（named pipe + 解 chunked）报告策略组当前选择与 Google 类流量的实际链路 →「手选节点不生效（主组挂 AUTO）」与「标称地区≠落地地区」两条判读；§4d.1；201 单测 |
+| 2026-09-18 | 1.7.9 | 合成帧协议修复：中性替代帧曾带 OpenAI 的 `data: [DONE]` → 客户端 proto 解析崩（先显示文本再 `Agent terminated due to error`）。改为照抄真实帧（CRLF 帧界 / 无 DONE / 两帧 / 带 usageMetadata）+ 车道隔离守卫 + 真实取证夹具 + 端到端 e2e；§4e；218 单测 |

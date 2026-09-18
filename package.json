@@ -1,6 +1,6 @@
-﻿{
+{
   "name": "antigravity-armor",
-  "version": "1.7.8",
+  "version": "1.7.9",
   "description": "Antigravity 鐮寸敳宸ョ▼锛氫簩杩涘埗鎻愮ず璇嶈ˉ涓?/ 瑙勫垯鎶€鑳?/ 鐢熷懡鍛ㄦ湡閽╁瓙 / 妯″瀷鍚庣鏀归亾 鈥斺€?鍥涘眰鍙鐜般€佸彲鍥炴粴鐨勮鐢叉祦姘寸嚎",
   "type": "module",
   "bin": {

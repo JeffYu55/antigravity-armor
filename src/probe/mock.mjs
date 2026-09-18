@@ -9,6 +9,14 @@
 //
 // 注意口径：mock 量的是**机器**（探测/升级/重投递有没有连通），不是模型的脾气。
 // 真实效果必须拿真端点跑同一套探针，见 `aarmor probe measure --target=<URL>`。
+//
+// ⚠ 车道区别（2026-09-18 定案，别抄错）：本文件是 **OpenAI 协议**模拟上游，
+//   `data: [DONE]` + `finish_reason: content_filter` 在这条车道上都是**正确**的。
+//   但 **Google/Gemini 车道绝不能带 `[DONE]`** —— 取证：真实上游 SSE 25/25 不含它，
+//   客户端把每个 `data:` 载荷当 protobuf 解析，撞上 `[` 当场崩：
+//     proto: syntax error (line 1:1): unexpected token [
+//   Gemini 车道的合成帧见 src/layers/gemini-retry.mjs 的 neutralSse，
+//   形状不变量由 test/sse-shape.test.mjs 以真实取证为基准锁死。
 import http from 'node:http'
 import { ALL_LADDERS } from '../layers/refusal.mjs'
 

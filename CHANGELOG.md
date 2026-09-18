@@ -1,5 +1,59 @@
 # Changelog
 
+## v1.7.9 — 「本地上游网关…」之后紧跟 `Agent terminated due to error`：合成帧里的 `[DONE]`
+
+主题：用户看到中性替代文本显示出来了，紧接着 `Agent terminated due to error`。
+不是装甲失效，是**我自己合成的那一帧写错了协议**。
+
+### 证据链
+
+会话 `840dde42` 步骤 #517 记录的原始错误：
+
+```
+Agent execution terminated due to error.
+agent executor error: calling model: proto: syntax error (line 1:1): unexpected token [
+```
+
+`unexpected token [` —— 解析器在第一行第一列撞上 `[`。而 `neutralSse` 的结尾正是：
+
+```
+data: [DONE]
+```
+
+**`[DONE]` 是 OpenAI 协议的终止符，Google 的流里没有它。** 取证（`state/capture` 25 个样本）：
+
+```
+25/25 真实上游 SSE 全部不含 [DONE]
+结尾一律是「最后一个 data: {...} 帧 + \r\n\r\n」然后直接 EOF
+帧0: content 帧（无 finishReason），response 里带 usageMetadata / modelVersion / responseId
+帧1: 收尾帧，parts:[{text:""}] + finishReason:"STOP"
+```
+
+客户端把每个 `data:` 载荷都当 protobuf 解析，于是撞上 `[` 当场崩 ——
+**先显示文本，再终止**，正是用户看到的顺序。
+
+### 修复
+
+- `neutralSse` 改为照抄真实帧：`\r\n\r\n` 帧界、**绝不发 `[DONE]`**、两帧（内容帧 + STOP 收尾帧）、
+  顶层键恰好 `response / traceId / metadata`、每帧带 `usageMetadata`。
+- 同一类偏差一并修掉：`sameModel` 车道手写的错误帧 `\n\n` → `\r\n\r\n`。
+- `src/probe/mock.mjs` 加注说明：它是 **OpenAI 协议** mock，`[DONE]` 在这条车道上是对的，
+  **但不能抄进 Gemini 车道** —— 这次事故就是抄错车道。
+
+### 测试（218 → 从 213 涨到 218 并新增 e2e）
+
+- **真实取证落夹具**：`test/fixtures/real-sse-{ok-2frame,inband-block,with-thoughts}.sse`
+  （从 `state/capture` 原样搬来，`.gitattributes` 已禁行尾归一化）。
+- `test/sse-shape.test.mjs` —— **照取证写，不照假设写**。旧测试是
+  `assert.ok(sse.includes('data: [DONE]'), '要有结束帧')`，**这个 bug 就是被它锁死的**。
+  新断言改成「合成帧必须与真实帧同形」（顶层键/response 键/candidate 键/content 键逐层比对）。
+  另含车道隔离守卫与反证 `testTheOldBuggyShapeWouldBeCaught`（证明这套不变量真的能抓到旧形状）。
+- `test/block-fallback-e2e.test.mjs` —— 端到端：真起 divert + 假上游回放真实过滤样本，
+  检查客户端**实际收到**的字节（无 `[DONE]`、CRLF 帧界、两帧、STOP 收尾、每帧带 usageMetadata），
+  并断言降档重试真的发生过（`maxAttempts=2` → 上游被打 2 次）。
+
+> 教训：**测"我发出去的东西"要用"上游真的发了什么"当基准，不能用"我以为它该长什么样"。**
+
 ## v1.7.8 — 「节点是德国的，为什么走到了日本」：手选的节点根本没生效
 
 主题：用户提问「clash 的节点是德国的，为什么走到了日本」。问 Clash 自己（mihomo 的

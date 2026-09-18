@@ -275,18 +275,38 @@ export const BLOCK_FALLBACK_TEXT = [
   '请继续：把任务拆成更小的步骤再发一次，或直接让我从当前进度接着做。）',
 ].join('')
 
-/** 合成一发合法的 Gemini SSE（客户端按同一形状解析；用于中性替代） */
-export function neutralSse(text) {
-  const ev = {
+/** 合成一发**与真实上游逐字同形**的 Gemini SSE（客户端按同一形状解析；用于中性替代）。
+ *
+ *   这里曾经有一个致命 bug（2026-09-18 定案，见 test/fixtures/real-sse-*.sse）：
+ *  旧版结尾写了 `data: [DONE]` —— 那是 **OpenAI 的约定，Google 的流里没有**。
+ *  取证：state/capture 里 25/25 个真实上游 SSE **全部不含 [DONE]**，
+ *  结尾一律是「最后一个 `data: {...}` 帧 + `\r\n\r\n`」然后直接 EOF。
+ *  客户端把每个 `data:` 载荷都当 protobuf 解析，于是撞上 `[` 当场崩：
+ *      agent executor error: calling model: proto: syntax error (line 1:1): unexpected token [
+ *  用户看到的现象正是「先显示中性替代文本，紧接着 Agent terminated due to error」。
+ *
+ *  所以形状必须照抄真实帧（三种偏差都要避免）：
+ *    1) 分隔符是 `\r\n\r\n`，不是 `\n\n`；
+ *    2) **绝不发 `[DONE]`**，流就停在一个带 `finishReason: "STOP"` 的帧上；
+ *    3) 顶层键恰好是 `response / traceId / metadata`，且 `usageMetadata` 要在 `response` 里
+ *       （真实帧每帧都带；缺了会让客户端的用量记账落空）。
+ *  这些不变量由 test/armor-strip.test.mjs 与 test/sse-shape.test.mjs 双向锁死。 */
+export function neutralSse(text, opts = {}) {
+  const usage = opts.usageMetadata || { promptTokenCount: 0, candidatesTokenCount: 0, totalTokenCount: 0 }
+  const frame = (parts, extra = {}) => ({
     response: {
-      candidates: [{ content: { role: 'model', parts: [{ text }] }, finishReason: 'STOP' }],
-      modelVersion: 'aarmor-local-fallback',
-      responseId: 'aarmor-neutral-' + Date.now(),
+      candidates: [{ content: { role: 'model', parts }, ...extra }],
+      usageMetadata: usage,
+      modelVersion: opts.modelVersion || 'aarmor-local-fallback',
+      responseId: opts.responseId || 'aarmor-neutral-' + Date.now(),
     },
     traceId: '',
     metadata: {},
-  }
-  return 'data: ' + JSON.stringify(ev) + '\n\ndata: [DONE]\n\n'
+  })
+  // 真实短回复就是这个形状：内容帧（无 finishReason）+ 收尾帧（空 text + STOP）
+  return 'data: ' + JSON.stringify(frame([{ text }]))
+    + '\r\n\r\ndata: ' + JSON.stringify(frame([{ text: '' }], { finishReason: 'STOP' }))
+    + '\r\n\r\n'
 }
 
 /** 出站/入站取证落盘（AARMOR_DUMP=full 或 divert.capture=true 时启用）。
@@ -776,7 +796,10 @@ export async function handleSameModel({ req, res, body, headers, cfg, armorText,
       const blocked = isBlockedResponse(r.status, r.rawBody || '')
       if (bad) { useSafety = false; log('SM-DEGRADE attempt=' + a + ' ' + r.status + ' 字段被拒 -> 丢安全设置重发') }
       else log((blocked ? 'SM-BLOCKED' : 'SM-UPSTREAM') + ' ' + r.status + ' attempt=' + a)
-      if (a === maxAttempts) { if (!res.destroyed && !res.writableEnded) { try { res.write('data: ' + JSON.stringify({ error: { code: r.status, message: '[armor] upstream non-200 after retries' } }) + '\n\n'); return res.end() } catch (e) { log('SM-WRITE-ERR ' + e.message); return } } return }
+      // 这是**故意**发一个错误帧（与本文件的 neutralSse 相反）：
+      // 上游非 200 重试到底了，就该如实让客户端终止这一轮，不能伪装成功。
+      // 帧界仍按 Gemini 车道的真实形状用 \r\n\r\n（不能用 OpenAI 的 \n\n + [DONE]）。
+      if (a === maxAttempts) { if (!res.destroyed && !res.writableEnded) { try { res.write('data: ' + JSON.stringify({ error: { code: r.status, message: '[armor] upstream non-200 after retries' } }) + '\r\n\r\n'); return res.end() } catch (e) { log('SM-WRITE-ERR ' + e.message); return } } return }
       continue
     }
     const inband = isBlockMessage(r.rawBody || r.text)

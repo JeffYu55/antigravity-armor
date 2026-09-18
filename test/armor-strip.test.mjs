@@ -160,10 +160,20 @@ export function testSafeDirectiveReplacesFullArmorOutbound() {
 export function testNeutralSseIsParsableByClient() {
   const sse = neutralSse(BLOCK_FALLBACK_TEXT)
   assert.ok(sse.startsWith('data: '), 'SSE 必须以 data: 开头')
-  assert.ok(sse.includes('data: [DONE]'), '要有结束帧')
-  const ev = JSON.parse(sse.split('\n')[0].slice(6))
+  // **绝不能再出现 [DONE]**：Google 的流里没有它，客户端会当成一帧去解析并当场崩：
+  //   proto: syntax error (line 1:1): unexpected token [
+  // 取证见 test/fixtures/real-sse-*.sse（25/25 真实样本都不含 [DONE]）。
+  assert.ok(!sse.includes('[DONE]'), '合成的流绝不能带 [DONE]（那是 OpenAI 约定，Google 客户端不认）')
+  assert.ok(sse.endsWith('\r\n\r\n'), '必须以真实的 CRLF 帧界收尾')
+  const frames = sse.split('\r\n\r\n').filter(Boolean)
+  assert.equal(frames.length, 2, '真实短回复就是两帧：内容帧 + STOP 收尾帧')
+  const ev = JSON.parse(frames[0].slice(6))
   assert.equal(ev.response.candidates[0].content.parts[0].text, BLOCK_FALLBACK_TEXT)
-  assert.equal(ev.response.candidates[0].finishReason, 'STOP')
+  assert.equal(ev.response.candidates[0].finishReason, undefined, '内容帧不带 finishReason（照抄真实形状）')
+  const tail = JSON.parse(frames[1].slice(6))
+  assert.equal(tail.response.candidates[0].finishReason, 'STOP', 'STOP 落在收尾帧上')
+  assert.equal(tail.response.candidates[0].content.parts[0].text, '')
+  assert.ok(ev.response.usageMetadata, '真实帧每帧都带 usageMetadata，缺了会让客户端用量记账落空')
   assert.ok(!isBlockMessage(BLOCK_FALLBACK_TEXT), '中性替代本身不能命中过滤提示判定')
   assert.ok(BLOCK_FALLBACK_TEXT.includes('上游边缘过滤'), '要如实说明是上游拦下的')
 }
