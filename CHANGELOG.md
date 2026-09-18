@@ -70,6 +70,21 @@ safe coding, security, or biology-related queries. Please try rephrasing your pr
 断言最后一档送出的请求体**真的变小了**（历史轮数下降、体积腰斩、仍以 user 开头）。
 旧实现每档送出去的字节一模一样 —— 这条断言就是用来钉住这件事的。
 
+### 顺带修掉的真实损坏 + 一条编码守卫（229 → 233）
+
+`package.json` 的 `description` 早在 **`bd229d2` 及更早的提交里就已经是乱码**了 ——
+用 PowerShell 的 `Get-Content -Raw` + `WriteAllText` 往返改版本号，读时按非 UTF-8 解码，
+中文变成 CP936 重解释乱码，**然后被 commit 进去了**。已从初版 `29280c2` 取回原文修复；
+`armor.config.json` 的 `prefillZh` 同样修回（两个文件都是中文内容、都不是代码）。
+
+新增 `test/encoding.test.mjs` 常驻守卫：扫全仓受版本控制的文本文件找乱码特征与 U+FFFD。
+**乱码也是合法 JSON，所以此前没有任何测试会失败** —— 这条把"没人会注意到"变成"提交前就红"。
+
+> 只有克隆能抓到的一条：守卫文件**自己**必然含那些乱码特征字（那是它的数据），
+> 本机跑时它还没进版本控制、`git ls-files` 不列它，所以本机全绿；
+> 一旦提交进克隆，它就把自己判红。已排除自指。
+> **再次印证：本机全绿 ≠ 克隆全绿。**
+
 ## v1.7.9 — 「本地上游网关…」之后紧跟 `Agent terminated due to error`：合成帧里的 `[DONE]`
 
 主题：用户看到中性替代文本显示出来了，紧接着 `Agent terminated due to error`。
