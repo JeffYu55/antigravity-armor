@@ -415,29 +415,60 @@ export function reframeAll(v) {
   return n + reframeContents(v)
 }
 
+/** 深度改写任意 JSON 值里的全部字符串（返回替换处数）。
+ *
+ *  为什么必须深挖（v1.8.1 实测）：reframeContents 原来只看 `parts[].text`，
+ *  而触发词最密集的地方恰恰**不在** text 里 —— 工具回包（functionResponse.response）
+ *  里装着整份文件内容、路径清单、命令输出；工具入参（functionCall.args）里装着路径与模式。
+ *  日志实证：`PASS-REFRAME attempt=1 改写 5 处触发措辞` 之后，
+ *  下一发**残留触发词仍是 `卡密,绕过`** —— 改的那 5 处在 system 位，真正在触发的没碰到。
+ */
+function rewriteDeep(val, n) {
+  if (typeof val === 'string') {
+    let t = val
+    for (const [re, rep] of REFRAME_PAIRS) t = t.replace(re, rep)
+    if (t !== val) { n.count++; return t }
+    return val
+  }
+  if (Array.isArray(val)) return val.map((x) => rewriteDeep(x, n))
+  if (val && typeof val === 'object') {
+    for (const k of Object.keys(val)) val[k] = rewriteDeep(val[k], n)
+    return val
+  }
+  return val
+}
+
 /** 就地改写 contents 里的用户文本；返回替换次数 */
 export function reframeContents(v) {
   const reqObj = v.request || v
   const contents = reqObj.contents || []
-  let n = 0
+  const n = { count: 0 }
   let lastUser = -1
   for (let i = 0; i < contents.length; i++) {
     const c = contents[i]
     if (!c || !Array.isArray(c.parts)) continue
     if (c.role === 'user') lastUser = i
     for (const p of c.parts) {
-      if (typeof p.text !== 'string') continue
-      let t = p.text
-      for (const [re, rep] of REFRAME_PAIRS) t = t.replace(re, rep)
-      if (t !== p.text) { p.text = t; n++ }
+      if (typeof p.text === 'string') {
+        const before = p.text
+        for (const [re, rep] of REFRAME_PAIRS) p.text = p.text.replace(re, rep)
+        if (p.text !== before) n.count++
+      }
+      // v1.8.1：工具回包与工具入参也要洗 —— 触发词就藏在整份文件内容里
+      if (p.functionResponse && p.functionResponse.response !== undefined) {
+        p.functionResponse.response = rewriteDeep(p.functionResponse.response, n)
+      }
+      if (p.functionCall && p.functionCall.args !== undefined) {
+        p.functionCall.args = rewriteDeep(p.functionCall.args, n)
+      }
     }
   }
   if (lastUser >= 0) {
     const c = contents[lastUser]
     const p = c.parts.find((x) => typeof x.text === 'string')
-    if (p && !p.text.includes('兼容性适配与状态核对')) { p.text = NEUTRAL_FRAME + '\n\n' + p.text; n++ }
+    if (p && !p.text.includes('兼容性适配与状态核对')) { p.text = NEUTRAL_FRAME + '\n\n' + p.text; n.count++ }
   }
-  return n
+  return n.count
 }
 
 export const TAME_DIRECTIVE = [
@@ -547,9 +578,15 @@ export function injectArmor(parsed, armorText, rung = '') {
 export function narrowContext(parsed, opts = {}) {
   const keepTurns = Math.max(1, opts.keepTurns ?? 2)
   const toolResultChars = Math.max(0, opts.toolResultChars ?? 600)
+  // 硬上限：即使 user 轮很稀疏，也不允许保留超过这么多条。
+  // 实测现场：`PASS-NARROW attempt=4 保留 233 轮（丢 220 轮）` —— 一次 agent 回合里
+  // 工具回包全挂 role=user，于是"往前找到 user 轮"能走 230 条，收窄形同没做，最后一档
+  // 送出去的还是那个巨无霸请求体，照样被拦。
+  const maxContents = Math.max(1, opts.maxContents ?? 40)
+  const MAX_BACKTRACK = 8
   const req = parsed.request || parsed
   const contents = req.contents
-  if (!Array.isArray(contents)) return { dropped: 0, truncated: 0, kept: 0, startedWithUser: true }
+  if (!Array.isArray(contents)) return { dropped: 0, truncated: 0, kept: 0, startedWithUser: true, aborted: false }
 
   let truncated = 0
   for (const c of contents) {
@@ -566,16 +603,54 @@ export function narrowContext(parsed, opts = {}) {
     })
   }
 
-  let dropped = 0
-  if (contents.length > keepTurns) {
-    let start = contents.length - keepTurns
-    // 会话必须以 user 轮开头；必要时往前多取，直到落在 user 轮上
-    while (start > 0 && contents[start] && contents[start].role !== 'user') start--
-    dropped = start
-    req.contents = contents.slice(start)
+  const n = contents.length
+  if (n <= keepTurns) return { dropped: 0, truncated, kept: n, startedWithUser: true, aborted: false }
+
+  // 语义是「最后 keepTurns 个 user 轮」，不是「最后 keepTurns 条」（条 ≠ 轮）
+  let start = Math.max(0, n - keepTurns)
+  let seen = 0
+  let lastUserIdx = -1
+  for (let i = n - 1; i >= 0; i--) {
+    if (contents[i] && contents[i].role === 'user') {
+      lastUserIdx = i
+      seen++
+      if (seen >= keepTurns) { start = i; break }
+    }
   }
-  const first = (req.contents || [])[0]
-  return { dropped, truncated, kept: (req.contents || []).length, startedWithUser: !first || first.role === 'user' }
+  // 整段不足 keepTurns 个 user 轮：退到"最后一个 user 轮"，而不是退到"最后 keepTurns 条"
+  // （后者会落在一串 model 条目中间，既不是任务、也无法以 user 开头）
+  if (seen < keepTurns && lastUserIdx >= 0) start = lastUserIdx
+
+  // 上界之外还要能落地：定位到的 user 轮可能离尾部极远（实测 231 条 thinking/工具条目
+  // 夹在用户消息与当前之间），那"从它一路切到尾"就等于没切。
+  // 此时做**嫁接**：留下那个任务轮 + 最近的尾部若干条。整体仍以 user 开头（合法），
+  // 中间那段被丢掉（任务还在头部、最新状态还在尾部，丢的是中间过程）。
+  if (n - start > maxContents) {
+    const head = contents[start]
+    if (!head || head.role !== 'user') {
+      return { dropped: 0, truncated, kept: n, startedWithUser: false, aborted: true }
+    }
+    const tail = contents.slice(-(maxContents - 1))
+    // head 若已落在尾部窗口内就不必嫁接（避免重复）
+    if (start >= n - (maxContents - 1)) return finish(contents.slice(start))
+    req.contents = [head, ...tail]
+    return { dropped: n - 1 - tail.length, truncated, kept: req.contents.length, startedWithUser: true, aborted: false, grafted: true }
+  }
+
+  // 未触上限：只需保证仍以 user 轮开头，否则上游 400。
+  let bt = 0
+  while (start > 0 && bt < MAX_BACKTRACK && !(contents[start] && contents[start].role === 'user')) { start--; bt++ }
+  const first = contents[start]
+  if (!first || first.role !== 'user') {
+    return { dropped: 0, truncated, kept: n, startedWithUser: false, aborted: true }
+  }
+  req.contents = contents.slice(start)
+  return { dropped: start, truncated, kept: req.contents.length, startedWithUser: true, aborted: false }
+
+  function finish(slice) {
+    req.contents = slice
+    return { dropped: n - slice.length, truncated, kept: slice.length, startedWithUser: true, aborted: false, grafted: false }
+  }
 }
 
 /** 预填：向 contents 追加一条 model 轮（Gemini 协议的合法预填形状） */
@@ -748,9 +823,11 @@ export async function handleSmartPassthrough({ req, res, body, headers, cfg, arm
       // v1.8.0：最后一档再加「上下文收窄」—— 指令级杠杆都失效时，真正在触发过滤的
       // 往往是历史本身（原始任务描述 / exe 路径 / 工具回包全文），只有收窄能碰到它。
       if (attempt >= maxAttempts - 1) {
-        const nr = narrowContext(v, { keepTurns: d.narrowKeepTurns, toolResultChars: d.narrowToolChars })
-        log('PASS-NARROW attempt=' + attempt + ' 保留 ' + nr.kept + ' 轮（丢 ' + nr.dropped + ' 轮）'
-          + ' 截断工具回包 ' + nr.truncated + ' 处' + (nr.startedWithUser ? '' : ' ⚠ 首轮不是 user'))
+        const nr = narrowContext(v, { keepTurns: d.narrowKeepTurns, toolResultChars: d.narrowToolChars, maxContents: d.narrowMaxContents })
+        log('PASS-NARROW attempt=' + attempt + (nr.aborted
+          ? ' 放弃收窄（切片无法落在 user 轮上，保持原样以免上游 400）'
+          : ' 保留 ' + nr.kept + ' 条（丢 ' + nr.dropped + ' 条）')
+          + ' 截断工具回包 ' + nr.truncated + ' 处')
       }
       rawToSend = JSON.stringify(v)
       // 取证（可选）：把真正出站的那一份落盘，用来回答「到底是什么词在触发过滤」

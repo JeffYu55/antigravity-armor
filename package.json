@@ -1,6 +1,6 @@
 {
   "name": "antigravity-armor",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "Antigravity 破甲工程：二进制提示词补丁 / 规则技能 / 生命周期钩子 / 模型后端改道 —— 四层可复现、可回滚的装甲流水线",
   "type": "module",
   "bin": {

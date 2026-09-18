@@ -37,6 +37,7 @@
     "maxAttempts": 5,
     "narrowKeepTurns": 2,
     "narrowToolChars": 600,
+    "narrowMaxContents": 40,
     "capture": false,
     "blockFallback": "neutral"
   },

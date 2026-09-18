@@ -63,4 +63,5 @@ export function testConfigChineseIsIntact() {
   assert.ok(cfg.divert.maxAttempts >= 5, '收窄档需要额外的尝试额度（v1.8.0）')
   assert.equal(cfg.divert.narrowKeepTurns, 2)
   assert.equal(cfg.divert.narrowToolChars, 600)
+  assert.equal(cfg.divert.narrowMaxContents, 40, '收窄必须带上界（v1.8.1：实测无上界时保留了 233 条）')
 }

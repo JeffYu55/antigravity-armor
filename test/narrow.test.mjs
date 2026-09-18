@@ -99,3 +99,62 @@ export function testFallbackTextItselfCarriesNoTriggerWords() {
   // 替代文案会作为 model 轮进入会话历史 —— 它自己带触发词就等于给下一发埋雷
   assert.deepEqual(scanHotWords(BLOCK_FALLBACK_TEXT), [], '中性替代不得含任何已知触发词')
 }
+
+// ——— v1.8.1：实测「收窄形同没做」的两个缺陷 ———
+//
+// 现场日志：`PASS-NARROW attempt=4 保留 233 轮（丢 220 轮）` ——
+// 一次 agent 回合里工具回包全挂 role=user，"往前找到 user 轮"能走 230 条，
+// 于是最后一档送出去的还是那个巨无霸请求体，照样被拦。
+
+export function testHardCapBoundsKeptContentsEvenWhenUserTurnsAreSparse() {
+  // 453 条、role=user 只在最前面出现一次 —— 旧实现会保留 232 条
+  const contents = [turn('user', 'origin')]
+  for (let i = 0; i < 452; i++) contents.push({ role: 'model', parts: [{ text: 'step ' + i }] })
+  const p = body(contents)
+  const r = narrowContext(p, { keepTurns: 2, maxContents: 40 })
+  assert.ok(p.request.contents.length <= 40, '硬上限必须生效（实际 ' + p.request.contents.length + '）')
+  assert.ok(r.dropped >= contents.length - 40 - 8, '真的丢掉了大头（丢 ' + r.dropped + '）')
+  assert.equal(r.aborted, false)
+}
+
+export function testAbortsInsteadOfEmittingAnIllegalShape() {
+  // 整段没有任何 role=user 的条目 → 无论怎么切都无法以 user 开头。
+  // 此时收窄会送出一个上游必然 400 的形状 —— 宁可放弃收窄（保持原样再被拦一次）。
+  const contents = []
+  for (let i = 0; i < 60; i++) contents.push({ role: 'model', parts: [{ text: 'm' + i }] })
+  const p = body(contents)
+  const before = JSON.stringify(p)
+  const r = narrowContext(p, { keepTurns: 2, maxContents: 10 })
+  assert.equal(r.aborted, true, '必须放弃收窄')
+  assert.equal(r.dropped, 0)
+  assert.equal(JSON.stringify(p), before, '放弃时不得改动 contents（工具回包截断仍可生效）')
+  assert.equal(r.startedWithUser, false, '要如实报告切不出合法形状')
+}
+
+export function testKeepTurnsCountsUserTurnsNotEntries() {
+  // 「最后 2 轮」的语义是最后 2 个 user 轮，不是最后 2 条 —— 条 ≠ 轮
+  const p = body([
+    turn('user', 'old-1'), turn('model', 'a'),
+    turn('user', 'old-2'), turn('model', 'b'), turn('model', 'b2'), turn('model', 'b3'),
+    turn('user', 'newest'),
+  ])
+  const r = narrowContext(p, { keepTurns: 2, maxContents: 99 })
+  assert.equal(r.dropped, 2, '停在倒数第二个 user 轮上')
+  assert.equal(p.request.contents[0].parts[0].text, 'old-2')
+  assert.equal(p.request.contents[p.request.contents.length - 1].parts[0].text, 'newest')
+}
+
+export function testRealisticAgentTurnGetsBoundedTail() {
+  // 一次真实 agent 回合：user 提问 → 大量 model 思考/工具调用 + user 工具回包
+  const contents = [turn('user', 'task')]
+  for (let i = 0; i < 120; i++) {
+    contents.push({ role: 'model', parts: [{ functionCall: { name: 'read_file', args: { path: 'f' + i } } }] })
+    contents.push({ role: 'user', parts: [{ functionResponse: { name: 'read_file', response: { content: 'C'.repeat(2000) } } }] })
+  }
+  const p = body(contents)
+  const r = narrowContext(p, { keepTurns: 2, maxContents: 40, toolResultChars: 600 })
+  assert.ok(p.request.contents.length <= 40, '尾部必须有界（实际 ' + p.request.contents.length + '）')
+  assert.equal(p.request.contents[0].role, 'user', '仍以 user 开头')
+  assert.ok(r.truncated > 0, '工具回包要被截断')
+  assert.ok(r.dropped > 200, '大头真的被丢掉（丢 ' + r.dropped + '）')
+}

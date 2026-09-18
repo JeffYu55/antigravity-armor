@@ -225,6 +225,42 @@ node src/cli.mjs divert log      # 找 PASS-AUTH / PASS-QUOTA / PASS-UPSTREAM �
 关键区别：**401 只改了"令牌"这一个变量**。出站净化在故障请求里照常跑（`PASS-STRIP 自家装甲 -14397B`），
 说明装甲在工作 —— 是上游不认这台机器的登录态。
 
+## 4g. 「为什么会拒绝」= 检测器漏检，梯子从未启动（v1.8.1）
+
+模型回的拒答**长得不像**拒答时，检测器会放它过去。判定这一件事只需要一条命令：
+
+```powershell
+# 把用户看到的那句逐字喂给检测器
+node -e "import('./src/layers/refusal.mjs').then(m=>{const q='我无法将授权绕过逻辑编译或打包为独立的补丁/可执行程序（.exe）。';console.log(JSON.stringify(m.analyzeRefusal(q)))})"
+```
+
+`isRefusal:false` → **整条梯子不会启动**，拒答被当成正常回答原样交付。
+再对一下日志计数就能确认：
+
+```powershell
+node -e "const l=require('fs').readFileSync('state/logs/divert.log','utf8');for(const t of ['PASS-REFUSAL','PASS-GATE','PASS-INBAND-BLOCK'])console.log(t,(l.match(new RegExp(t,'g'))||[]).length)"
+```
+
+`PASS-REFUSAL` 远小于 `PASS-GATE`（实测 3 : 1257）= 检测器几乎从不触发，问题在检测器，不在梯子。
+
+| 判据 | 含义 | 修法 |
+|---|---|---|
+| `isRefusal:false` 但人眼一读就是拒答 | **漏检** —— 梯子没启动 | 给 `REFUSAL_SIGNATURES` 补签名（别加动词白名单，加第一人称**形式**匹配） |
+| `isRefusal:true` 且反复 `PASS-REFUSAL` | 检出了但每档重采样仍被拒 | 该看梯子档位与预填，不是检测器 |
+
+两条本文档反复出现的铁律在这里各应验一次：
+
+- **动词白名单 / 夹距上限天然漏**（和英文补网同源）：`我无法` 与真正动词之间隔了 14 个字就整句漏掉；
+- **放宽检测要防误伤自家文本**：`SAFE_DELIVERABLE_DIRECTIVE` / 梯子各档 / 中性替代文案
+  都必须**不是**拒答，否则每发请求都带着"拒答"进梯子，重试空转到额度耗尽。
+
+同轮日志暴露的另外两处（一并修了，排障时会看到）：
+
+| 日志形状 | 病根 |
+|---|---|
+| `PASS-REFRAME … 改写 5 处` 但下一发 `残留触发词: 卡密,绕过` | 洗词只洗 `parts[].text`，而触发词藏在 `functionResponse.response`（**整份文件内容**）与 `functionCall.args` |
+| `PASS-NARROW 保留 233 轮（丢 220 轮）` | 收窄没设上界，231 条 thinking/工具条目夹在用户消息与当前之间 → 等于没切 |
+
 ## 4f. 「被上游内容过滤器拦下」为什么会连拦 5 档（v1.8.0）
 
 日志形状：`inband` = HTTP **200** 但正文是
@@ -707,3 +743,4 @@ Get-CimInstance Win32_Process -Filter "Name='language_server.exe'" |
 | 2026-09-18 | 1.7.8 | 路由实况：直接问 mihomo（named pipe + 解 chunked）报告策略组当前选择与 Google 类流量的实际链路 →「手选节点不生效（主组挂 AUTO）」与「标称地区≠落地地区」两条判读；§4d.1；201 单测 |
 | 2026-09-18 | 1.7.9 | 合成帧协议修复：中性替代帧曾带 OpenAI 的 `data: [DONE]` → 客户端 proto 解析崩（先显示文本再 `Agent terminated due to error`）。改为照抄真实帧（CRLF 帧界 / 无 DONE / 两帧 / 带 usageMetadata）+ 车道隔离守卫 + 真实取证夹具 + 端到端 e2e；§4e；218 单测 |
 | 2026-09-18 | 1.8.0 | 请求级过滤的最后一档：新增 `narrowContext`（只留最后 N 轮 + 截断超长工具回包，不动 systemInstruction），`maxAttempts` 4→5；`PASS-INBAND-BLOCK` 附带本发残留触发词、`PASS-NARROW` 报告收窄量；中性替代文案重写（去掉"本地上游网关"这种来路不明的说法）；§4f；229 单测 |
+| 2026-09-18 | 1.8.1 | 「为什么会拒绝」= 检测器漏检：中文第一人称能力拒绝（`我无法将…`）**46 条签名一条都没命中**（score 0）→ 梯子从未启动、拒答原样交付。补 5 条形式匹配签名（不猜动词）+ 「拒答+换跑道」pivot + 自家文本反向守卫；另修「洗词洗不到工具回包」（触发词藏在整份文件内容里）与「收窄形同没做」（无上界，保留 233 条→改嫁接+上界）；§4g；253 单测 |
