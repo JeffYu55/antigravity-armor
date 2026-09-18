@@ -14,6 +14,7 @@ import { resolveKey } from './credentials.mjs'
 import { log } from './log.mjs'
 import { upstreamWarning, scanUpstream } from './diag/upstream.mjs'
 import { probeLanguageServers } from './diag/ls.mjs'
+import { netcheck } from './diag/net.mjs'
 
 const argv = process.argv.slice(2)
 const cmd = argv[0]
@@ -191,6 +192,31 @@ function divert(action) {
   if (action === 'watchdog') return runWatchdog(port)
   if (action === 'autostart') return divertAutostart(positional[1] || 'status')
   if (action === 'run') return runDivert(port)
+}
+
+/** 出口网络体检（v1.7.7）：回答两个不同的问题
+ *   1) divert 的流量到底有没有走代理？（Node 不读系统代理 —— 最容易漏的一环）
+ *   2) 出口 IP 本身能不能用？（机房 ASN 信誉 / 国家是否受限）
+ *  现场：用户怀疑「流量没经过 Clash」，实测三条路径出口一致（Clash 生效），
+ *  真正的问题是出口是 Vultr 机房 IP（AS20473，被第三方判 bad network reputation）。 */
+async function netcheckCmd() {
+  const proxy = flags.proxy || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || ''
+  console.log('\n出口网络体检\n' + '─'.repeat(60))
+  console.log('  显式代理: ' + (proxy || '(未设置 HTTPS_PROXY/HTTP_PROXY)'))
+  const r = await netcheck({ proxyUrl: proxy })
+  console.log('  divert 直连出口 IP : ' + (r.direct || '(取不到)'))
+  console.log('  显式走代理出口 IP  : ' + (r.viaProxy || '(取不到)'))
+  if (r.nodeEgressEqualsProxy === true) console.log('  → 一致：divert 的流量**确实**经过代理')
+  else if (r.nodeEgressEqualsProxy === false) console.log('  → **不一致**：divert 在直连，代理没吃到它的流量')
+  else console.log('  → 无法比对（有一侧取不到）')
+  const g = r.geo || {}
+  console.log('\n  归属: ' + [g.country, g.city, g.isp].filter(Boolean).join(' / '))
+  console.log('  ASN : ' + (g.as || '-') + (g.hosting ? '   [hosting/datacenter]' : ''))
+  const a = r.assessment
+  console.log('\n判读: ' + (a.ok ? '✅ ' : '⚠ ') + a.verdict)
+  for (const h of a.hints) console.log('  ' + h)
+  for (const e of r.errors) console.log('  (取数失败: ' + e + ')')
+  console.log('')
 }
 
 /** 常驻看门狗（v1.7.3）：每 5 分钟检查一次，代理不在就拉起。
@@ -453,7 +479,7 @@ async function seatsCmd(sub) {
   throw new Error('未知子命令 ' + sub + '（list/preview/deploy/verify/restore）')
 }
 
-const commands = { status, verify, install, divert, ls, drive, rollback, eval: evalCmd, probe: probeCmd, seats: seatsCmd }
+const commands = { status, verify, install, divert, ls, drive, rollback, netcheck: netcheckCmd, eval: evalCmd, probe: probeCmd, seats: seatsCmd }
 const SUBCOMMANDS = new Set(['divert', 'ls', 'drive', 'eval', 'probe', 'seats'])
 const handler = commands[cmd]
 if (!handler) {
@@ -464,9 +490,10 @@ if (!handler) {
   aarmor verify [--json]              审计锚点/注册表
   aarmor rollback --layer=binary|ide|rules|hooks
   aarmor divert start|stop|status|run [--port=50100] [--model=deepseek-chat]
-  aarmor divert ensure                幂等保活：代理不在就拉起，在监听就静默退出（供计划任务调用）
-  aarmor divert autostart install|uninstall|status
+  aarmor divert ensure                幂等保活：代理不在就拉起，在监听就静默退出（供计划任务调用）  aarmor divert autostart install|uninstall|status
                                       登录自启 + 每 5 分钟兜底 —— 代理一没，IDE 连账号都登录不上
+  aarmor netcheck [--proxy=http://127.0.0.1:7897]
+                                      出口体检：divert 的流量有没有走代理 + 出口 IP 信誉（机房 ASN/受限地区）
   aarmor ls start|stop [--port=50095]
   aarmor drive new "<prompt>" --port=<LS_HTTP> [--workspace=DIR] [--project=ID]
   aarmor drive reply <conversationId> [--json]

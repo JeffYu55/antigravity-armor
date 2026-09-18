@@ -219,9 +219,42 @@ node src/cli.mjs divert log      # 找 PASS-AUTH / PASS-QUOTA / PASS-UPSTREAM �
 | **容量**（503） | `No capacity available for model X` | 换模型即可 |
 | **链路**（代理死） | `dial tcp 127.0.0.1:50100: connectex` | `divert start`（+ `autostart install`） |
 | **破甲**（真失效） | `PASS-GATE ... text=` 有正文却是拒答措辞；或 `PASS-REFUSAL` 反复触发 | 才轮到改装甲/规则 |
+| **地区**（ineligible / location） | IDE 报 `not currently available in your location` | `netcheck` 看出口信誉 —— 机房 IP 换节点，**不是破甲问题** |
 
 关键区别：**401 只改了"令牌"这一个变量**。出站净化在故障请求里照常跑（`PASS-STRIP 自家装甲 -14397B`），
 说明装甲在工作 —— 是上游不认这台机器的登录态。
+
+## 4d. 出口体检（v1.7.7）—— 「流量没经过 Clash」要分两件事查
+
+看到一个报错就怀疑代理，容易查错方向。`netcheck` 把两个**不同**的问题分开回答：
+
+```powershell
+node src/cli.mjs netcheck
+```
+
+```
+显式代理: http://127.0.0.1:7897
+divert 直连出口 IP : 199.247.20.29
+显式走代理出口 IP  : 199.247.20.29
+→ 一致：divert 的流量**确实**经过代理
+
+归属: Germany / The Constant Company, LLC
+ASN : AS20473 The Constant Company, LLC   [hosting/datacenter]
+
+判读: ⚠ 199.247.20.29  Germany  AS20473 (Vultr / Choopa)
+  ⚠ 出口是**机房 IP**：AS20473（Vultr / Choopa）—— 风控常判为「无法确认位置」。
+    修法：换一条家宽/中转/专线节点，别用裸机房 IP。
+```
+
+1. **链路**：`divert 直连出口 IP` 与 `显式走代理出口 IP` 是否一致。
+   **Node 不读系统代理**（浏览器读，Node 不读）—— 若代理只在系统代理模式下开着而没开 TUN，
+   divert 会绕过去直连。不一致就是这个问题，修法是给代理开 **TUN 模式**（全局接管），
+   或让 divert 显式走 `HTTPS_PROXY` + CONNECT 隧道。
+2. **出口 IP 本身**：机房/托管 ASN（15 条常见表）、`hosting` 标记、受限国家。
+   实测踩到的 `AS20473 (Vultr)` 被第三方直接判 `bad network reputation` ——
+   Google 同样无法从这种 IP 确认位置，于是报「地区不可用」。
+
+`设置 HTTPS_PROXY` 的机器可以直接 `netcheck`；也可 `--proxy=http://127.0.0.1:PORT` 指定。
 
 `ls` 行现在以**真实进程**为准（`running ×N，其中 M 个指向 divert`）；若显示 `未指向 divert`，
 说明 L4 补丁被 IDE 更新覆盖了，跑 `node src/cli.mjs install --layer=ide --apply` 打回。
@@ -575,3 +608,5 @@ Get-CimInstance Win32_Process -Filter "Name='language_server.exe'" |
 | 2026-09-17 | 1.7.3 | 代理保活（`ensure` / `watchdog` / `autostart`，无管理员权限时降级启动文件夹）+ `status` 致命组合告警 + `stripPad` 绝对 URI 与 `/api` 误伤两个 bug；161 单测 |
 | 2026-09-18 | 1.7.4 | 推送后克隆验证：夹具逐字节用例改成「按能否随 git 传输分类」（NTFS ADS 进不了 git）+ `test/fixtures/** -text` 禁行尾归一化；161 单测 |
 | 2026-09-18 | 1.7.5 | 故障三分法：`PASS-AUTH`/`PASS-QUOTA` 日志 + `status` 上游健康判读（只看最后一次 200 之后）+ `ls` 行改以真实进程为准（`running ×N，其中 M 个指向 divert`）；173 单测 |
+| 2026-09-18 | 1.7.6 | 账号接口不再隐形：divert 回退分支记 `PASS-RELAY`；`PASS-AUTH` 对账号 lane 也生效；令牌体检 `AUTH-INFO`（永不含令牌）+ 可选 tokeninfo 鉴定（默认关闭）；180 单测 |
+| 2026-09-18 | 1.7.7 | 出口体检 `aarmor netcheck`：链路（Node 不读系统代理 → divert 可能直连）与出口信誉（机房 ASN / 受限地区）分开判读；§4d；190 单测 |

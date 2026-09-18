@@ -1,5 +1,64 @@
 # Changelog
 
+## v1.7.7 — 「not available in your location」不是破甲问题，是出口 IP 的信誉问题
+
+主题：用户看到 IDE 报
+`Sorry, this account is ineligible to use Antigravity ... not currently available in your location`，
+第一反应是「流量是不是没经过 Clash」。实测**经过**，真问题在**出口节点的信誉**。
+新增 `aarmor netcheck` 把「链路有没有走代理」和「出口能不能用」两件事分开回答。
+
+### 现场证据
+
+```
+三条路径出口 IP 完全一致 → Clash 生效
+  node 直连          199.247.20.29
+  curl 显式走代理    199.247.20.29
+  curl 强制直连      199.247.20.29
+0.0.0.0/0 -> ifIndex=76 iface=Meta metric=0     # TUN 接管
+Clash 规则: rules: - MATCH,PROXY                # 一条兜底，全部走代理
+```
+
+但同一个 IP 被第三方直接以**网络信誉**拒绝：
+
+```
+You have been blocked from performing anonymous queries
+due to bad network reputation (AS20473)
+```
+
+`AS20473` = `199.247.20.29` 的 ASN（Vultr / Choppa 机房）。Google 同样无法从一个
+被标记的机房 IP 确认用户位置 → 判「地区不可用」。同时 LS 自己也确认了令牌是坏的：
+
+```
+11:42:58  Failed to get granted scopes in background poll: tokeninfo returned status 400
+03:43:01  TOKENINFO 令牌在 Google 侧无效/已撤销（invalid_token）—— 必须重新登录
+```
+
+### 新增
+
+- `aarmor netcheck [--proxy=URL]` —— 出口网络体检，回答两个**不同**的问题：
+  1. **divert 的流量到底有没有走代理？** 用 CONNECT 隧道显式走一遍代理，比对出口 IP。
+     不一致 = divert 在直连（Node 不读系统代理，这是最容易漏的一环）。
+  2. **出口 IP 本身能不能用？** 机房 ASN 信誉（15 条常见机房 ASN 表）+ 受限地区 + `hosting` 标记。
+- `src/diag/net.mjs` —— `httpsViaProxy`（CONNECT + TLS，零依赖）、`assessExit`（纯函数判读，可测）、`netcheck`。
+- `test/net.test.mjs` —— 10 条，含三条硬约束：
+  - 机房 IP **不能**被判成可用；
+  - 取不到对照值时**不得**诬告 divert 直连（否则会把人引到错的修法上）；
+  - 出口没问题时要把矛头指向**账号侧**，不能让人继续调代理。
+
+## v1.7.6 — 账号接口不再隐形：回退分支补日志 + 令牌体检
+
+主题：排查「401 到底出在哪一环」时发现，账号接口（`loadCodeAssist` / `fetchAvailableModels` /
+`ListExperiments`）走的是 divert 的**回退分支**，转发完一个字都不记 ——
+于是两个多小时的账号接口全 401，在 divert 日志里是**空白**。
+
+- divert 回退分支记 `PASS-RELAY <code> <path>`，401/403/429 追加判读行。
+- `parseResponses` 同时认 `RELAY h2 ->`(模型) 与 `PASS-RELAY`(账号)；
+  `status` 会点名「其中 N 次是**账号接口**」。
+- `src/diag/token.mjs`：每请求记 `AUTH-INFO`，报令牌形态与有效期，**永不含令牌本身**。
+- `src/diag/tokeninfo.mjs`（**默认关闭**，`AARMOR_TOKENINFO=1` 或 `cfg.divert.tokenInfo` 开启）：
+  401 时调 Google 自己的 tokeninfo，把「令牌过期/被撤销」与「令牌有效但请求被拒」一次分清。
+  令牌只在内存里传给 `oauth2.googleapis.com`，不落日志。
+
 ## v1.7.5 — 「Agent terminated due to error」不是破甲失效，是账号令牌被上游拒了
 
 主题：用户看到 IDE 报 `Agent terminated due to error`，第一反应是「装甲又失效了」。
