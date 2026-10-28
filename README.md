@@ -4,6 +4,9 @@
 
 所有能力来自对本机样本的实测逆向与调试，不是推测：见文末「实测证据」。
 
+> **操作手册：`docs/MANUAL.md`**（装 / 看状态 / 升级自愈 / 回滚卸载 / 排错）。
+> 运维状态机改造的映射表：`docs/PURGE-REFIT.md`。
+
 ---
 
 ## 五层装甲
@@ -306,6 +309,7 @@ test/                  337 个单测（含 test/purge.test.mjs：戳/冷却/stal
 test/fixtures/evasion-eval/   迁入的证据隐匿评测夹具（原独立项目，含原 Python 参考实现）
 scripts/               install.ps1 / uninstall.ps1 / regression-clean-binary.mjs / run-one.mjs（单跑一条 + 挂死看门狗）
 docs/DEPLOY.md         部署说明（前置检查 / 逐步部署 / 分层验证 / 运维 / 重部署 / 回滚 / 排障）
+docs/MANUAL.md         操作手册（v1.9.0）：命令速查 / status 逐行 / ensure 分支 / 排错表 / 状态文件
 docs/PURGE-REFIT.md    运维状态机移植：映射表 / 状态目录 / ensure 流程 / 三个真坑 / 诚实边界
 docs/EVASION-EVAL.md   证据隐匿评测：6 类手法 / 判据 / 打分口径 / 跨 git 注意事项
 docs/BREAK-PERF.md     破甲跑分：两个口径 / 剂量-反应 / 残余≠漏检 / 加探针

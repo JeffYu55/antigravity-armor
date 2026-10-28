@@ -20,6 +20,9 @@
 - `aarmor armor status|edit|reset`：提示词覆盖位（`state/purge/armor-override.md` 存在即生效，
   `override-state.json` 记 customized/hash/seedHash；种子更新只报 seedChanged，不静默覆盖）。
 - `src/version.mjs`（`AARMOR_VERSION`）、`src/purge/{state,hostbackups,reapply,uninstall,override}.mjs`。
+- `docs/MANUAL.md`：操作手册（命令速查 / status 逐行 / ensure 分支表 / 排错手册 / 状态与备份清单）。
+- 顺手修掉三处「文档写了、命令没有」：`aarmor lsnet` 未接线（status 提示指了它却跑不通）、
+  `divert restart` / `divert log` 无分支（静默无操作）、spawn 未透传 `--target`（换端点会沿用旧配置）。
 
 **修掉的两个真隐患**
 
