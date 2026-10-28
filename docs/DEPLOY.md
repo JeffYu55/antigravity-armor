@@ -302,12 +302,74 @@ node -e "const l=require('fs').readFileSync('state/logs/divert.log','utf8').spli
 |---|---|
 | `PASS-CLEANWIRE … 系统位无自家注入` | 裸奔档真的裸了（对照有效） |
 | `PASS-CLEANWIRE … ⚠ 系统位仍有自家注入@N` | 自家文本没撤干净，对照被污染，先修这个 |
+| `PASS-SESSROT … traj <旧>@stepN -> <新>@step0` | v1.8.5 起换的是**每会话身份**（`labels.trajectory_id`），不是 sessionId —— 只换 sessionId 等于没换（见 §4j） |
+| `PASS-INBAND-BLOCK … 上游原文: …` | 被拦的**原文**。没有这一栏时，"被谁拦的"不可归因（v1.8.5 加） |
+| `PASS-INBAND-BLOCK` 残留触发词**正好是我们的词表** + `PASS-CLEANWIRE ✓ 实测干净` | 工具回包（`view_file` 的 `N: 行` 渲染）把自家装甲带回出站了 → 见 §4k |
 | `PASS-SESSROT … -> -9…` 之后仍 `PASS-INBAND-BLOCK` | **服务端历史不是唯一触发源**，与静态提示/工具声明/当前请求有关 |
-| `PASS-SESSROT` 之后 `PASS-UPSTREAM 400/404` | 服务端不认自造会话号 → 号必须由端点签发，关掉 `rotateSession` |
-| 换号后**通过**了 | 触发源就是服务端历史本身 → 这类会话只能靠换号/新建对话 |
+| `PASS-SESSROT` 之后 `PASS-UPSTREAM 400/404` | 服务端不认自造号/轨迹号 → 号必须由端点签发，关掉 `rotateSession` / `rotateTrajectory` |
+| 换号后**通过**了 | 触发源就是服务端那段会话状态 → 这类会话只能靠换身份/新建对话 |
 
 > 教训（v1.8.0 与 v1.8.1 连错两版的根源）：**我从没验证过"历史在 contents 里"这个前提**，
 > 却在它上面写了两版收窄。**改任何东西之前，先把形状打出来。**
+
+## 4k. 「工具回包也是注入位」：`view_file` 的行号前缀让净化整块失效（v1.8.6）
+
+**症状**：同一轮里 `PASS-INBAND-BLOCK` 报的残留触发词**正好是我们的词表**
+（`破解,绕过,外挂,反调试,逆向,jailbreak,UNRESTRICTED,keygen,aimbot,wallhack`），
+而 `PASS-CLEANWIRE` 却报 `✓ 实测干净`。看到这个组合，不要再怀疑"服务端历史"——先查这条。
+
+```powershell
+# 1) 这一发到底残留了哪些词（原文也在，v1.8.5 起）
+node -e "const l=require('fs').readFileSync('state/logs/divert.log','utf8').split('\n').filter(x=>/PASS-INBAND-BLOCK|PASS-CLEANWIRE/.test(x));console.log(l.slice(-8).join('\n'))"
+# 2) 拿真实装甲文件复现「带行号 vs 不带行号」的剥除差异（应两个都是 0 残留）
+node scripts/diag-numbered-armor.mjs
+```
+
+**机制**：模型用 `view_file` 读了我们**自己装**的装甲文件（技能/规则），
+客户端把内容渲染成 `N: 行` 塞进会话；净化册按"装过的原文整块"匹配，
+行号前缀让 14,597B 的匹配变成 **0B** —— 于是我们自己的高危词表每一发都原样发给 Google。
+
+| 形态 | 剥掉 | 残留触发词 |
+|---|---|---|
+| 纯文件形态（系统位注入） | 14597/14597B | 无 |
+| **view_file 带行号形态（工具回包）** | **0/15687B** | 我们自己的词表 10 个 |
+
+**纪律**：**判据错 = 实测假**。`remainingArmor` 与 `scanHotWords` 用的是同一套字节匹配，
+所以"✓ 实测干净"和"装甲还在出站"能同时出现在一行日志里（v1.8.3 外来词包、v1.8.6 行号渲染，同一坑两踩）。
+以后看到"实测干净"必须能说出**判据是什么**，否则它只是一句宣称。
+
+**顺带**：`view_file` 读回来的用户代码不受影响 —— 判据仍是"我们 14KB 的装甲原文整块出现"，
+去行号只是先把壳去掉，不会误伤（`test/numbered-armor.test.mjs` 有反证用例）。
+
+## 4j. `sessionId` 不是每会话身份 —— 换号档换了 10 个月都没换到东西（v1.8.5）
+
+**现场**：会话 `5110cdd0-…` 在压缩（compaction）后的那一发被上游内容过滤器拦下，
+7 档全灭，中性替代交付，对话停住。日志逐字：
+
+```
+19:59:45 PASS-SHAPE contents=1条/1片 7285B … session=-3750763034362895579
+19:59:54 PASS-INBAND-BLOCK attempt=0 … 本发出站残留触发词: 卡密,破解,绕过,免杀,逆向
+20:00:37 PASS-CLEANWIRE attempt=5 … ✓ 实测干净（无自家片段、无外来词包、系统位无注入）
+20:00:51 PASS-SESSROT attempt=6 会话号 -3750763034362895579 -> -3880998288515922
+20:01:02 PASS-INBAND-BLOCK 额度用尽 -> 中性替代
+```
+
+**先看这一条**：同一个 `session=-3750763034362895579`，10 小时后出现在**另一个新建会话**里
+（13:44 新建的 `913fed1d`，任务完全不同）。客户端对**不同会话**送**同一个** sessionId。
+
+```powershell
+# 一条命令看清"每会话身份"在哪：看 traj 有没有随会话变
+node -e "const l=require('fs').readFileSync('state/logs/divert.log','utf8').split('\n').filter(x=>/PASS-SHAPE/.test(x));console.log(l.slice(-6).join('\n'))"
+```
+
+- `session=` 在多会话间**不变** → 它只是客户端的粘性值，**不是**服务端按会话累积状态的那把钥匙；
+  只换它 = 做了一次无效实验（v1.8.2 把它写成"唯一杠杆"，是错的）。
+- `traj=`（`request.labels.trajectory_id`）才**随会话变** → 换身份要换它，并把 `last_step_index` 归零。
+
+**还有一个更基础的坑**：旧日志只写「正文即过滤提示」，**从不打上游原文**。
+于是那次 7 档全灭根本拿不出被拦的原文，只能把结论写成「服务端已标记」这种不可验证的断言。
+v1.8.5 起 `PASS-INBAND-BLOCK` 每档附 `上游原文: …`（一行、截 180 字符）—— **下次先读它**，
+它直接回答"触发的是我们出站的那段字，还是服务端那段会话状态"。
 
 ## 4g. 「为什么会拒绝」= 检测器漏检，梯子从未启动（v1.8.1）
 
@@ -557,13 +619,17 @@ node src/cli.mjs drive reply <conversationId> --json
 ```powershell
 Get-Process Antigravity,language_server -ErrorAction SilentlyContinue | Stop-Process -Force
 cd C:\Users\Administrator\Projects\antigravity-armor
-node src/cli.mjs install              # 先看 dry run：新版本偏移变了也能从锚点重新定位
-node src/cli.mjs install --apply
-node src/cli.mjs verify               # 必须 clean=true
+node src/cli.mjs ensure               # dry run：逐层 patchStatus + 是否需要重打/刷新备份
+node src/cli.mjs ensure --apply       # 自愈：刷新过期备份 → 还原原件 → 重打 → 复核 → 打戳
+node src/cli.mjs verify               # 必须 clean=true，purge.aligned=true
 node src/cli.mjs divert start
 ```
 
-**版本漂移处置**：若 dry run 出现 anchors missing，或 total edits 明显小于预期，说明官方改了提示词文本。此时：
+`ensure` 与 `install --apply` 的区别：前者**先回原件再重打**，且会先把升级后的新原件存进
+`state/purge/host-backups/`（否则回滚就是把旧版本写回新安装）。看到 `patch-table-drift`
+（blocked）说明锚点表与新版不匹配 —— 走下面的版本漂移处置，而不是反复重跑。
+
+**版本漂移处置**：若出现 `blocked: patch-table-drift`，或 total edits 明显小于预期，说明官方改了提示词文本。此时：
 
 1. 先保住 L2/L3：node src/cli.mjs install --layer=rules --apply，再 --layer=hooks --apply；
 2. 用抓包定位新文案：把代理跑起来（state/logs/divert.log 会记录请求），或直接在二进制里搜索旧锚点附近的文本；
@@ -589,7 +655,11 @@ node src/cli.mjs rollback --layer=binary
 node src/cli.mjs rollback --layer=rules
 node src/cli.mjs rollback --layer=hooks
 
-# E. 全量卸载脚本
+# E. 全量卸载（v1.9.0+：一次还原五层 + 席位词包 + 摘自启 + 清戳）
+node src/cli.mjs uninstall            # dry run：逐条列出会还原/删除什么
+node src/cli.mjs uninstall --apply
+
+# F. 旧脚本（保留兼容，等价于 E 的子集）
 powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
 ```
 

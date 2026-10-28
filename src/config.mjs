@@ -19,6 +19,7 @@ export function loadConfig(overrides = {}) {
     backupDir: join(stateDir, 'backup'),
     logDir: join(stateDir, 'logs'),
     captureDir: join(stateDir, 'capture'),
+    purgeDir: join(stateDir, 'purge'),
     antigravityRoot: root,
     binaryPath: join(root, cfg.binary.relative),
     asarPath: join(root, cfg.ide.relative),
@@ -32,6 +33,7 @@ export function loadConfig(overrides = {}) {
     divert: cfg.divert,
     hooks: cfg.hooks,
     rules: cfg.rules,
+    purge: cfg.purge || {},
   }
 }
 

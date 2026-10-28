@@ -1,6 +1,6 @@
 {
   "name": "antigravity-armor",
-  "version": "1.8.3",
+  "version": "1.9.0",
   "description": "Antigravity 破甲工程：二进制提示词补丁 / 规则技能 / 生命周期钩子 / 模型后端改道 —— 四层可复现、可回滚的装甲流水线",
   "type": "module",
   "bin": {
@@ -11,6 +11,8 @@
     "test:one": "node scripts/run-one.mjs",
     "status": "node src/cli.mjs status",
     "verify": "node src/cli.mjs verify",
+    "ensure": "node src/cli.mjs ensure",
+    "uninstall": "node src/cli.mjs uninstall",
     "install": "node src/cli.mjs install --dry-run",
     "divert": "node src/cli.mjs divert start",
     "eval": "node src/cli.mjs eval report",

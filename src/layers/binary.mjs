@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync, existsSync, copyFileSync } from 'node:fs'
 import { backup, listBackups } from '../util/fs.mjs'
 import { equalLength, collectEdits, applyEdits, diffRanges, countOccurrences } from '../util/bytes.mjs'
 import { patchTable } from '../config.mjs'
+import { saveOriginal, refreshStaleOriginal, restoreOriginal } from '../purge/hostbackups.mjs'
 import { log } from '../log.mjs'
 
 function collectBlock(buf, t) {
@@ -95,12 +96,32 @@ export function installBinary(cfg, { apply = false } = {}) {
   if (!apply) return { dryRun: true, ...report }
   if (report.edits === 0) return { applied: 0, note: 'already armored / no anchors matched' }
 
+  // 内容寻址备份：只保存「原件」。已装甲的文件不能当原件，否则回滚会把装甲写回去。
+  if (!already) saveOriginal(cfg, cfg.binaryPath, buf)
   const bak = backup(cfg.binaryPath, cfg.backupDir, 'pre-binary')
   writeFileSync(cfg.binaryPath, out)
   const d = diffRanges(buf, out)
   log.ok('patched ' + report.edits + ' ranges, ' + d.bytes + ' bytes changed, length ' + buf.length + ' -> ' + out.length)
   log.ok('backup: ' + bak)
   return { applied: report.edits, backup: bak, changedBytes: d.bytes, sameLength: d.sameLength, ...report }
+}
+
+/** 逐补丁漂移实检（v1.9.0，移植 dsh-purge 的 patchStatus）：
+ *  pending>0 = 锚点还在、补丁没打（可 ensure 重打）；
+ *  armored 但 pending>0 = 半打状态（先还原再重打）；
+ *  未装甲且 pending=0 = 锚点表与当前 exe 不匹配（版本漂移，不能瞎打）。 */
+export function patchStatusBinary(cfg, { path = null } = {}) {
+  const p = path || cfg.binaryPath
+  if (!existsSync(p)) return { layer: 'binary', exists: false, armored: false, pending: 0, blocked: 'missing' }
+  const buf = readFileSync(p)
+  const armored = buf.includes(Buffer.from(cfg.binary.marker, 'utf8'))
+  let report = null
+  try { report = runPasses(cfg, buf).report } catch { report = null }
+  const pending = report ? report.edits : 0
+  return {
+    layer: 'binary', exists: true, armored, pending, report,
+    blocked: !armored && pending === 0 ? 'patch-table-drift' : null,
+  }
 }
 
 /** 审计：装甲标记存在 + 关键拒绝锚点消失 */
@@ -126,6 +147,11 @@ export function verifyBinary(cfg, path = null) {
 }
 
 export function rollbackBinary(cfg) {
+  // 先刷新过期备份（v1.9.0）：Antigravity 升级后 live 是新原件、bak 还是旧版，
+  // 直接还原 = 把旧版本写回新安装。刷新后还原的是「当前这一版的原件」。
+  refreshStaleOriginal(cfg, cfg.binaryPath, cfg.binary.marker)
+  const hit = restoreOriginal(cfg, cfg.binaryPath)
+  if (hit) return hit.restored
   const b = listBackups(cfg.backupDir, 'pre-binary')[0] || listBackups(cfg.backupDir, 'language_server')[0]
   if (!b) throw new Error('no binary backup in ' + cfg.backupDir)
   copyFileSync(b.path, cfg.binaryPath)

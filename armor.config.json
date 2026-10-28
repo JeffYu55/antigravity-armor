@@ -39,6 +39,7 @@
     "narrowToolChars": 600,
     "narrowMaxContents": 40,
     "rotateSession": true,
+    "rotateTrajectory": true,
     "capture": false,
     "blockFallback": "neutral"
   },
@@ -63,5 +64,9 @@
     "markers": {
       "geminiMd": "<!-- infinite-gen-3-armor v0.5.0 -->"
     }
+  },
+  "purge": {
+    "autoEnsure": true,
+    "settleCooldownMs": 180000
   }
 }

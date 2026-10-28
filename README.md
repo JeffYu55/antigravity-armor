@@ -35,7 +35,7 @@ Antigravity IDE ──spawn──> language_server.exe ──┐
 
 ```powershell
 cd C:\Users\Administrator\Projects\antigravity-armor
-node test/run.mjs                      # 155 个单测，零依赖
+node test/run.mjs                      # 337 个单测，零依赖
 node scripts/run-one.mjs probe.test.mjs testDivertConsumesRequestBody   # 单跑一条（带挂死看门狗）
 node src/cli.mjs install               # 默认 dry-run，先看清楚要改什么
 node src/cli.mjs install --apply       # 落盘（自动备份到 state/backup）
@@ -50,10 +50,13 @@ node src/cli.mjs status                # 五层状态总览
 ## 常用命令
 
 ```
-aarmor status                     五层状态总览（含 BOM 异常、端口、密钥解析）
-aarmor verify [--json]            审计：装甲标记、残留锚点、备份列表
+aarmor status                     五层状态总览（含 BOM 异常、端口、密钥解析、purge 戳）
+aarmor verify [--json]            审计：装甲标记、残留锚点、备份列表、purge 段
 aarmor install [--apply] [--layer=binary|rules|hooks|ide] [--workspaces=a,b]
+aarmor ensure [--apply] [--force] 幂等自愈：刷新过期备份 → 还原原件 → 重打 → 复核 → 打戳
+aarmor uninstall [--apply]        全量还原（binary/asar/席位/rules/hooks/清戳），默认 dry-run
 aarmor rollback --layer=binary|ide|rules|hooks
+aarmor armor status|edit|reset    提示词覆盖位（用户副本优先于 assets/armor.md 种子）
 aarmor divert start|stop|status|run [--port] [--model] [--target]
 aarmor ls start|stop              拉起/停掉语言服务器（复刻 IDE spawn 契约）
 aarmor drive new "<prompt>" --port=<LS_HTTP> [--workspace=DIR] [--project=ID]
@@ -162,15 +165,38 @@ node src/cli.mjs probe measure --target=<ENDPOINT> --json    # 真实：量模�
 
 ---
 
+## 运维状态机（PURGE-REFIT，v1.9.0）
+
+参考本机在装的 **dsh-purge**，把「应用/回滚/自愈」状态机搬了进来 —— 补上一直敞着的三个坑：
+升级后靠人记性重打、回滚可能把旧版本写回新安装、「标记在」不等于「这版宿主打过」。
+
+- `state/purge/applied.json`：戳（armorVersion + binary/asar 的 sha256 rev + 装甲正文 hash）。
+- `state/purge/host-backups/`：binary/asar 的**内容寻址**原件；回滚前先 `refreshStaleOriginal`
+  —— live 无 marker 且与 bak 不同，说明宿主被换过，先把新原件入备份再还原。
+- `aarmor ensure [--apply]`：逐层 `patchStatus` → 刷新过期 bak → 还原 → 重打 → 复核 → 打戳。
+  `divert autostart` 每 5 分钟顺带跑（`cfg.purge.autoEnsure`），已对齐时只读。
+- 逐补丁漂移可见：`pending`（锚点在没打）/ `blocked: patch-table-drift`（锚点表与新版不匹配）。
+- 文件占用（Windows 运行中的 exe）→ 该层 `deferred` + 退出码 1，不会写坏半个文件。
+- `aarmor uninstall [--apply]`：全量还原；`aarmor armor edit`：改装甲正文（覆盖位，种子更新不静默覆盖）。
+
+细节与映射表见 `docs/PURGE-REFIT.md`。
+
+---
+
 ## 运维
 
 **Antigravity 升级后**（二进制与 asar 会被覆盖）：
 
 ```powershell
-node src/cli.mjs install --apply     # 幂等：已打过的层自动跳过
-node src/cli.mjs verify              # 确认 0 残留锚点
+node src/cli.mjs ensure --apply      # 幂等自愈：刷新过期备份 → 重打 → 复核 → 打戳
+node src/cli.mjs verify              # 确认 0 残留锚点 + purge 段对齐
 node src/cli.mjs divert start
 ```
+
+`ensure` 也可以交给保活任务代劳（`divert autostart install` 之后每 5 分钟顺带跑），
+但**升级后第一次**建议手动跑一次看看输出：锚点表若与新版不匹配，它会显式报
+`patch-table-drift`（那时需要重抽 `patches/binary-patches.json`，不是重跑能解决的）。
+`install --apply` 仍可用（分层重装 / dry-run 预览），落盘后同样会打戳。
 
 **回滚**：
 
@@ -239,13 +265,18 @@ node src/cli.mjs divert ensure              # 幂等保活，供计划任务调�
 
 ```
 src/
-  cli.mjs              统一入口（status/install/verify/rollback/divert/ls/drive）
+  cli.mjs              统一入口（status/install/ensure/uninstall/armor/verify/rollback/divert/ls/drive）
   config.mjs           配置解析（armor.config.json → 绝对路径）
   credentials.mjs      密钥解析（env → ~/.dsh/.credentials.yaml refs）
   log.mjs              分级日志
   util/fs.mjs          BOM 安全读写、原子写、备份/还原
   util/bytes.mjs       等长补丁引擎（收集/应用/差分/计数）
   proto/convert.mjs    Gemini ↔ OpenAI 纯函数转换
+  purge/state.mjs      应用戳 / settle 冷却 / 版本历史（移植 dsh-purge）
+  purge/hostbackups.mjs 内容寻址备份 + 过期备份刷新（防旧版回写新版）
+  purge/reapply.mjs    aarmor ensure：逐层 patchStatus → 重打 → 复核 → 打戳
+  purge/uninstall.mjs  aarmor uninstall：全量还原（席位先于 rules）
+  purge/override.mjs   提示词覆盖位（armor-override.md + seedHash 追踪）
   layers/refusal.mjs   拒绝判定引擎（多签名加权 + 交付物判定 + 围栏掩码/条件护栏 + 中英双阶梯）
   layers/gemini-retry.mjs  Google 车道：出站净化（剥自家装甲/过滤回声）+ 升档重试 + 中性替代
   layers/rules.mjs     层 2：全局规则 / 技能（frontmatter description 零触发词）/ 工作区规则
@@ -271,10 +302,11 @@ assets/
   hooks/*.cjs          4 个钩子脚本
 patches/
   binary-patches.json  41 个注入点（数据驱动，从实战脚本抽取）
-test/                  142 个单测
+test/                  337 个单测（含 test/purge.test.mjs：戳/冷却/stale 刷新/ensure/卸载/覆盖位）
 test/fixtures/evasion-eval/   迁入的证据隐匿评测夹具（原独立项目，含原 Python 参考实现）
 scripts/               install.ps1 / uninstall.ps1 / regression-clean-binary.mjs / run-one.mjs（单跑一条 + 挂死看门狗）
 docs/DEPLOY.md         部署说明（前置检查 / 逐步部署 / 分层验证 / 运维 / 重部署 / 回滚 / 排障）
+docs/PURGE-REFIT.md    运维状态机移植：映射表 / 状态目录 / ensure 流程 / 三个真坑 / 诚实边界
 docs/EVASION-EVAL.md   证据隐匿评测：6 类手法 / 判据 / 打分口径 / 跨 git 注意事项
 docs/BREAK-PERF.md     破甲跑分：两个口径 / 剂量-反应 / 残余≠漏检 / 加探针
 state/                 backup/ logs/ hooks/ tmp/ capture/（运行时产物）

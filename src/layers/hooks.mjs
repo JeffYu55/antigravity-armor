@@ -69,6 +69,25 @@ export function hooksDrift(cfg) {
   })
 }
 
+/** 层 3 漂移实检：脚本副本漂移 + 各 hooks.json 是否等于应写入的内容（无 BOM、命令不带引号） */
+export function patchStatusHooks(cfg, { workspaces = null } = {}) {
+  const scriptDir = join(cfg.stateDir, 'hooks')
+  const notes = []
+  let pending = 0
+  for (const d of hooksDrift(cfg)) {
+    if (d.drift) { pending++; notes.push('script drift ' + d.file) }
+  }
+  const want = buildHooksJson(scriptDir)
+  const ws = workspaces || discoverWorkspaces(cfg)
+  const targets = [...(cfg.hooks.globalRoots || []).map(expand), ...ws.map((w) => join(w, '.agents'))]
+  for (const dir of targets) {
+    const p = join(dir, 'hooks.json')
+    if (!existsSync(p)) { pending++; notes.push('missing ' + p); continue }
+    if (readText(p) !== want) { pending++; notes.push('differs ' + p) }
+  }
+  return { layer: 'hooks', pending, notes }
+}
+
 /** 钩子脚本 + hooks.json 部署（全局根 + 工作区） */
 export function installHooks(cfg, { apply = false, workspaces = null } = {}) {
   const hooksDir = join(cfg.stateDir, 'hooks')
