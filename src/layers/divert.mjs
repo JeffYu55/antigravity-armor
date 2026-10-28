@@ -52,7 +52,15 @@ export function jitteredTemperature(base, attemptNo, step = 0.15) {
 
 export function createDivertServer(cfg, opts = {}) {
   const key = opts.key || resolveKey(cfg, cfg.divert.keyRef)
-  if (!key) throw new Error('no API key: set ' + cfg.divert.keyRef + ' or add it to ~/.dsh/.credentials.yaml refs')
+  // v1.8.4：无 key 不再拒绝启动 —— 降级为「仅透传」模式。
+  // 现场（2026-09-30）：credentials.yaml 被改丢了 keyRef，代理每次拉起 3 秒内崩溃、
+  // watchdog 每 5 分钟白拉一次，50100 永远无人监听 —— 而透传通道（loadCodeAssist
+  // 等账号接口）根本不用这个 key，结果**连 Antigravity 登录都被拖死**
+  // （IDE 报 dial tcp 127.0.0.1:50100: connectex: No connection could be made）。
+  // 降级语义：登录/账号/模型清单照常透传；改道请求返回 503 + 修复指引（见 NO-KEY 分支），
+  // 不再是连接拒绝。key 只有 full-divert 的 attempt() 用得上，sameModel/passThrough 都不用。
+  const keyMissing = !key
+  if (keyMissing) log.warn('divert: 未解析到 ' + cfg.divert.keyRef + ' —— 降级为仅透传模式：登录/账号接口照常，改道请求将返回 503')
   const model = opts.model || cfg.divert.model
   const target = opts.target || cfg.divert.target
   const upstream = cfg.divert.upstream
@@ -334,6 +342,13 @@ export function createDivertServer(cfg, opts = {}) {
           handleSmartPassthrough({ req, res, body, headers: req.headers, cfg, armorText: SAFE_DELIVERABLE_DIRECTIVE, log: say })
           return
         }
+        // 仅透传降级（v1.8.4）：走到这里说明配置要求真改道，而 key 缺失 ——
+        // 如实拒绝这一条并带上修复指引，客户端面板上显示的是人话，不是 SSE 断流。
+        if (keyMissing) {
+          say('NO-KEY ' + req.method + ' ' + req.url.slice(0, 60) + ' -> 503（仅透传模式，改道不可用）')
+          res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' })
+          return res.end(JSON.stringify({ error: { code: 503, message: 'armor divert: no API key (' + cfg.divert.keyRef + ') — 降级为仅透传模式，改道不可用。把 key 加回 ~/.dsh/.credentials.yaml refs 或设置同名环境变量，然后重启 divert。' } }))
+        }
         let parsed
         try { parsed = JSON.parse(body.toString('utf8')) } catch (e) { say('PARSE-ERR ' + e.message); res.writeHead(500); return res.end('{}') }
         // 语言在入口判一次：决定预填与升级阶梯用中文还是英文
@@ -361,14 +376,18 @@ export function createDivertServer(cfg, opts = {}) {
               .then((r) => say(tokenInfoLine(r)))
               .catch(() => {})
           }
-        } else if (code === 429) say('PASS-QUOTA 429 上游额度用尽 —— 账号侧配额，不是链路问题。')
+        } else if (code === 429) {
+          // v1.7.7：非 GenerateContent 的账号接口也可能 429 —— 但这些是普通 JSON 请求，
+          // 客户端自己会解析错误体，保持原样透传即可；只加日志定位。
+          say('PASS-QUOTA 429 上游额度用尽（账号接口）—— 账号侧配额，不是链路问题。')
+        }
         res.writeHead(code, pres.headers); pres.pipe(res)
       })
       preq.on('error', (e) => { say('PASS-ERR ' + e.message); if (!res.headersSent) res.writeHead(502); res.end('{}') })
       preq.end(body)
     })
   })
-  return { server, model, target, upstream, key: key.slice(0, 6) + '…' }
+  return { server, model, target, upstream, keyMissing, key: key ? key.slice(0, 6) + '…' : null }
 }
 
 export function installCrashGuards(say) {
@@ -381,10 +400,15 @@ export function installCrashGuards(say) {
 }
 
 export function startDivert(cfg, opts = {}) {
-  const { server, model, target } = createDivertServer(cfg, opts)
+  const { server, model, target, keyMissing } = createDivertServer(cfg, opts)
   const port = opts.port || cfg.divert.port
-  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => {
-    log.ok('divert listening on 127.0.0.1:' + port + ' -> ' + target + ' (model=' + model + ')')
-    resolve(server)
-  }))
+  return new Promise((resolve, reject) => {
+    // v1.8.4：listen 失败（EADDRINUSE / EACCES）此前是未捕获异常 —— 进程静默退出，
+    // stderr 只有半截堆栈，watchdog 日志里只剩一行「拉起」。挂上 error 后当场定案。
+    server.on('error', (e) => reject(e))
+    server.listen(port, '127.0.0.1', () => {
+      log.ok('divert listening on 127.0.0.1:' + port + ' -> ' + target + ' (model=' + model + ')' + (keyMissing ? ' [仅透传：缺 ' + cfg.divert.keyRef + '，改道不可用]' : ''))
+      resolve(server)
+    })
+  })
 }
