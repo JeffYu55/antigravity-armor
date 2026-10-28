@@ -274,6 +274,18 @@ function divert(action) {
   if (action === 'watchdog') return runWatchdog(port)
   if (action === 'autostart') return divertAutostart(positional[1] || 'status')
   if (action === 'run') return runDivert(port)
+  // 文档里一直是 `divert restart --model=…`，但以前没有这个分支（命令静默无操作）。
+  if (action === 'restart') {
+    divert('stop')
+    return divert('start')
+  }
+  // 同上：`divert log | Select-String …` 是取证常用姿势，以前也没接线。
+  if (action === 'log') {
+    const lp = join(cfg.logDir, 'divert.log')
+    if (!existsSync(lp)) { log.warn('没找到 ' + lp); return }
+    console.log(readText(lp).split('\n').slice(-Number(flags.tail || flags.lines || 200)).join('\n'))
+    return
+  }
 }
 
 /** 语言服务器出站体检（v1.8.4）—— 专治「五层全绿，IDE 还弹 network issue」。
@@ -406,7 +418,10 @@ function spawnDivert(port) {
   mkdirSync(cfg.logDir, { recursive: true })
   const errFd = openSync(errFile, 'a')
   const selfPath = fileURLToPath(import.meta.url)
-  const child = spawn(process.execPath, [selfPath, 'divert', 'run', '--port=' + port, '--model=' + (flags.model || cfg.divert.model)], { detached: true, stdio: ['ignore', errFd, errFd], windowsHide: true })
+  const args = [selfPath, 'divert', 'run', '--port=' + port, '--model=' + (flags.model || cfg.divert.model)]
+  // --target 以前没透传：`divert restart --target=…` 会静默沿用配置里的旧 target
+  if (flags.target) args.push('--target=' + flags.target)
+  const child = spawn(process.execPath, args, { detached: true, stdio: ['ignore', errFd, errFd], windowsHide: true })
   child.unref()
   log.ok('divert spawned (pid ' + child.pid + '), log: ' + logFile + ', stderr: ' + errFile)
   // v1.8.4：拉起后探活。此前 spawn 完就当成功 —— 可代理若因缺 key / 端口被占而秒崩，
@@ -758,7 +773,7 @@ async function seatsCmd(sub) {
   throw new Error('未知子命令 ' + sub + '（list/preview/deploy/verify/restore）')
 }
 
-const commands = { status, verify, install, divert, ls, drive, rollback, ensure: ensureCmd, uninstall: uninstallCmd, armor: armorCmd, netcheck: netcheckCmd, eval: evalCmd, probe: probeCmd, seats: seatsCmd, rules: rulesCmd }
+const commands = { status, verify, install, divert, ls, drive, rollback, ensure: ensureCmd, uninstall: uninstallCmd, armor: armorCmd, netcheck: netcheckCmd, lsnet: lsnetCmd, eval: evalCmd, probe: probeCmd, seats: seatsCmd, rules: rulesCmd }
 const SUBCOMMANDS = new Set(['divert', 'ls', 'drive', 'eval', 'probe', 'seats', 'rules', 'armor'])
 const handler = commands[cmd]
 if (!handler) {
@@ -773,11 +788,12 @@ if (!handler) {
   aarmor verify [--json]              审计锚点/注册表/purge 戳
   aarmor rollback --layer=binary|ide|rules|hooks
   aarmor armor status|edit|reset      提示词覆盖位（用户副本优先于 assets/armor.md 种子）
-  aarmor divert start|stop|status|run [--port=50100] [--model=deepseek-chat]
+  aarmor divert start|stop|status|restart|log [--port=50100] [--model=] [--target=]
   aarmor divert ensure                幂等保活：代理不在就拉起，在监听就静默退出（供计划任务调用）  aarmor divert autostart install|uninstall|status
                                       登录自启 + 每 5 分钟兜底 —— 代理一没，IDE 连账号都登录不上
   aarmor netcheck [--proxy=http://127.0.0.1:7897]
                                       出口体检：divert 的流量有没有走代理 + 出口 IP 信誉（机房 ASN/受限地区）
+  aarmor lsnet [--timeout=4000]       语言服务器出站体检：直连 / 环境变量代理 / LS 日志判读
   aarmor ls start|stop [--port=50095]
   aarmor drive new "<prompt>" --port=<LS_HTTP> [--workspace=DIR] [--project=ID]
   aarmor drive reply <conversationId> [--json]
