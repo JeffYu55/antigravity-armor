@@ -351,7 +351,7 @@ export function createDivertServer(cfg, opts = {}) {
             }
           }
           seat.traj = seat.traj || traj
-          say('INJECT seat +' + Buffer.byteLength(seat.text) + 'B lvl=' + seat.level + ' kind=' + seat.kind + ' hash=' + seat.hash + ' traj=' + String(seat.traj).slice(0, 12))
+          say('INJECT seat +' + Buffer.byteLength(seat.text) + 'B lvl=' + seat.level + ' kind=' + seat.kind + ' hash=' + seat.hash + ' model=' + String(parsedBody?.model || '?') + ' traj=' + String(seat.traj).slice(0, 12))
           attachObserver(res, {
             cfg, traj: seat.traj, lane, provider: 'gemini', model: cfg.divert.sameModel ? 'same-model' : 'passthrough',
             seatHash: seat.hash, kind: seat.kind,

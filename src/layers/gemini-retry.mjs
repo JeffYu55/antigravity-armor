@@ -660,6 +660,14 @@ export const REFRAME_PAIRS = [
   [/反调试/g, '运行态观测'],
   [/过检测/g, '运行环境核对'],
   [/免杀/g, '兼容处理'],
+  // v2.6 补面：反自动化检测/注册风控这一类的措辞（现场：模型直接点名 DataDome 拒绝）
+  [/DataDome/gi, '第三方反自动化检测组件'],
+  [/反爬虫|反爬/g, '访问频控'],
+  [/指纹环境|浏览器指纹|设备指纹|指纹/g, '环境特征'],
+  [/风控/g, '合规校验'],
+  [/批量注册|注册机/g, '批量开户流程'],
+  [/规避/g, '适配'],
+  [/人机验证/g, '人机校验环节'],
 ]
 
 /** 中性工程框架前言：只加背景，不改任务内容 */
@@ -1445,6 +1453,14 @@ export async function handleSameModel({ req, res, body, headers, cfg, armorText,
       // 首档不再裸奔；升档指令仍只从第 2 档起叠。
       injectArmor(fresh, safeOrArmor(armorText), (a > 1 && rungs && rungs[a - 2]) || '')
       if (a > 1) withPrefill(fresh, prefill)
+    }
+    // 重试档换的是「请求本身」：确定性重塑任务措辞 + 可选换模型
+    // （依据：参考项目实测「GUI 给的 4 个模型里只有一个会照做」，同一模型重采样救不回来）
+    if (a > 1) {
+      const nRef = reframeAll(fresh)
+      if (nRef) log('SM-REFRAME attempt=' + a + ' 改写 ' + nRef + ' 处措辞')
+      const force = d.forceModel || (d.modelRemap && d.modelRemap[String(fresh.model || '')])
+      if (force && fresh.model !== force) { log('SM-MODEL attempt=' + a + ' ' + fresh.model + ' -> ' + force); fresh.model = force }
     }
     const bodyBuf = Buffer.from(JSON.stringify(fresh), 'utf8') // 原地改：顶层 project / requestId 必须原样带出
     const r = await geminiOnce({ upstream: d.upstream, path, headers, bodyBuf })
