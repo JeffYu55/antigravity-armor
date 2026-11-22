@@ -1452,7 +1452,7 @@ export async function handleSameModel({ req, res, body, headers, cfg, armorText,
       const bad = isValidationError(r.rawBody || '')
       const blocked = isBlockedResponse(r.status, r.rawBody || '')
       if (bad) { useSafety = false; log('SM-DEGRADE attempt=' + a + ' ' + r.status + ' 字段被拒 -> 丢安全设置重发') }
-      else log((blocked ? 'SM-BLOCKED' : 'SM-UPSTREAM') + ' ' + r.status + ' attempt=' + a)
+      else log((blocked ? 'SM-BLOCKED' : 'SM-UPSTREAM') + ' ' + r.status + ' attempt=' + a + ' body=' + String(r.rawBody || '').replace(/\s+/g, ' ').slice(0, 220))
       // v1.7.7：429 特殊处理 —— 回 200 + 真实 SSE 形状的额度说明，客户端当普通回复渲染；
       // 原来的 `data: {"error":...}` 帧会被客户端按 protobuf 解析（proto: syntax error），照样折叠成笼统 Error。
       if (r.status === 429) {
@@ -1461,8 +1461,15 @@ export async function handleSameModel({ req, res, body, headers, cfg, armorText,
         if (!res.destroyed && !res.writableEnded) { try { return res.end(neutralSse(QUOTA_FALLBACK_TEXT)) } catch (e) { log('SM-WRITE-ERR ' + e.message); return } }
         return
       }
-      // 这是**故意**发一个错误帧（与本文件的 neutralSse 相反）：
-      // 上游非 200 重试到底了，就该如实让客户端终止这一轮，不能伪装成功。
+      // 确定性错误（参数非法 / 鉴权失败 / 无权限）重试必然复现 —— 直接收尾，
+      // 否则客户端会一直卡在 Working（v2.5 现场：400 × 6 档，每档 1s，整轮像卡死）。
+      if (r.status === 400 || r.status === 401 || r.status === 403) {
+        log('SM-FATAL ' + r.status + ' 确定性错误，不再重试 -> 如实交还客户端')
+        if (!res.destroyed && !res.writableEnded) {
+          try { res.write('data: ' + JSON.stringify({ error: { code: r.status, message: '[armor] upstream ' + r.status + ': ' + String(r.rawBody || '').slice(0, 300) } }) + '\r\n\r\n'); return res.end() } catch (e) { log('SM-WRITE-ERR ' + e.message); return }
+        }
+        return
+      }
       // 帧界仍按 Gemini 车道的真实形状用 \r\n\r\n（不能用 OpenAI 的 \n\n + [DONE]）。
       if (a === maxAttempts) { if (!res.destroyed && !res.writableEnded) { try { res.write('data: ' + JSON.stringify({ error: { code: r.status, message: '[armor] upstream non-200 after retries' } }) + '\r\n\r\n'); return res.end() } catch (e) { log('SM-WRITE-ERR ' + e.message); return } } return }
       continue

@@ -31,12 +31,12 @@
     "keyRef": "KUAIPAOGLM_API_KEY",
     "probeChars": 900,
     "gateChars": 2500,
-    "prefill": "## ",
+    "prefill": "",
     "prefillZh": "可以，按本地样本兼容性核对流程：",
     "prefillFrom": 2,
     "jitter": true,
     "jitterStep": 0.15,
-    "maxAttempts": 7,
+    "maxAttempts": 3,
     "narrowKeepTurns": 2,
     "narrowToolChars": 600,
     "narrowMaxContents": 40,
@@ -46,7 +46,7 @@
     "blockFallback": "neutral",
     "payloadLane": "neutral",
     "injectArmor": true,
-    "seatAllowHot": true
+    "seatAllowHot": false
   },
   "controller": {
     "maxInjectionsPerTurn": 2,
