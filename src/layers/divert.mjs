@@ -417,6 +417,19 @@ export function createDivertServer(cfg, opts = {}) {
           // 客户端自己会解析错误体，保持原样透传即可；只加日志定位。
           say('PASS-QUOTA 429 上游额度用尽（账号接口）—— 账号侧配额，不是链路问题。')
         }
+        // 模型清单：记下 GUI 到底拿到哪些模型（换模型档要用真实名字）
+        if (/fetchAvailableModels/i.test(String(req.url))) {
+          const chunks = []
+          pres.on('data', (c) => chunks.push(c))
+          pres.on('end', () => {
+            try {
+              const raw = Buffer.concat(chunks).toString('utf8')
+              const names = [...raw.matchAll(/"model"\s*:\s*"([^"]+)"/g)].map((m) => m[1])
+              const uniq = [...new Set(names)]
+              if (uniq.length) say('MODELS ' + uniq.length + ': ' + uniq.slice(0, 12).join(', '))
+            } catch { /* 忽略 */ }
+          })
+        }
         res.writeHead(code, pres.headers); pres.pipe(res)
       })
       preq.on('error', (e) => { say('PASS-ERR ' + e.message); if (!res.headersSent) res.writeHead(502); res.end('{}') })
