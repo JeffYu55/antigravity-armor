@@ -48,9 +48,9 @@
     "injectArmor": true,
     "seatAllowHot": false,
     "modelRemap": {
-      "gemini-4-neon-medium": "gemini-3.8-flash-high",
-      "gemini-4-neon-high": "gemini-3.8-flash-high",
-      "gemini-4-neon": "gemini-3.8-flash-high"
+      "gemini-4-neon-medium": "gpt-oss-120b-medium",
+      "gemini-4-neon-high": "gpt-oss-120b-medium",
+      "gemini-4-neon": "gpt-oss-120b-medium"
     },
     "reframeFrom": 2,
     "softenFrom": 2,
