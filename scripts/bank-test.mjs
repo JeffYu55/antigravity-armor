@@ -66,7 +66,7 @@ const CATS = [
 const catOf = (t) => (CATS.find(([, re]) => re.test(t)) || CATS[CATS.length - 1])[0]
 
 async function probe(text, model) {
-  const body = JSON.stringify({ text, model, seat: SEAT, maxTokens: 1200 })
+  const body = JSON.stringify({ text, model, seat: SEAT, maxTokens: Number(arg('maxTokens') || 1200) })
   for (let attempt = 0; attempt < 4; attempt++) {
     const res = await fetch('http://127.0.0.1:50100/armor/probe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
     const j = await res.json()
