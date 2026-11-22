@@ -20,7 +20,7 @@ if (j.error) { console.log('probe error: ' + j.error); process.exit(1) }
 const scored = scoreResponse(j.text || '', { finishKind: String(j.finish || '').toLowerCase() })
 console.log('model     ' + j.model + '   HTTP ' + j.status + '  ' + j.ms + 'ms  finish=' + j.finish + '  chars=' + j.chars)
 if (j.body) console.log('body      ' + String(j.body).replace(/\s+/g, ' ').slice(0, 600))
-console.log('verdict   ' + scored.verdict + '/' + scored.layer + '  words=' + JSON.stringify(scored.words))
+console.log('verdict   ' + scored.verdict + '/' + scored.layer + '  toolCalls=' + (j.toolCalls || 0) + '  words=' + JSON.stringify(scored.words))
 console.log('--- head 300 ---')
 console.log((j.text || '').slice(0, 300))
 console.log('--- tail 500 ---')

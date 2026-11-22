@@ -374,20 +374,28 @@ export function createDivertServer(cfg, opts = {}) {
           if (!lastAuth) return res.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'no cached auth yet — 先在 IDE 里发一条消息' }))
           const seatText = spec.seat !== undefined ? String(spec.seat) : (currentSeat(cfg, cfg.inject?.lane || 'neutral'))
           const modelName = String(spec.model || 'gemini-4-hydrogen-medium')
-          // 优先复放「最近一次真实请求体」（schema 一定合法），再改 text / seat / model
+          // 优先生成「干净请求」：不带 tools/labels/sessionId 时模型才会以文本作答（真正的交付物）。
+          // spec.replay=true 可退回复放真实请求体。
           let payload = null
-          if (lastReqBody) {
+          if (spec.replay === true && lastReqBody) {
             try {
               payload = JSON.parse(lastReqBody)
               const reqObj = payload.request || (payload.request = {})
               reqObj.contents = [{ role: 'user', parts: [{ text: String(spec.text || '') }] }]
-              const sys = reqObj.systemInstruction
-              if (sys && Array.isArray(sys.parts) && sys.parts.length) {
-                // 保留客户端静态身份片，末片换成我们的座位
-                sys.parts = sys.parts.slice(0, -1).concat([{ text: seatText }])
-              } else {
-                reqObj.systemInstruction = { role: 'user', parts: [{ text: seatText }] }
+              // 多轮渐进：spec.history = [{role:'user'|'model', text:'...'}]，按顺序前置
+              if (Array.isArray(spec.history) && spec.history.length) {
+                const pre = spec.history
+                  .filter((h) => h && h.text)
+                  .map((h) => ({ role: h.role === 'model' ? 'model' : 'user', parts: [{ text: String(h.text) }] }))
+                reqObj.contents = [...pre, ...reqObj.contents]
               }
+              // 探针语义：只留「座位 + 用户文本」，把客户端 38 KB 的 agent 身份提示整段换掉。
+              // 否则客户端那段「你是 agent / 用工具作答」会让模型只回 functionCall 或干脆空文本，
+              // 测量出来的「空响应」是假的（实测 hydrogen / 3.8 都会这样）。
+              reqObj.systemInstruction = { role: 'user', parts: [{ text: seatText }] }
+              // 注意：**保留 tools**。实测 3.8-flash-high 在没有 tools 时会回 MALFORMED_FUNCTION_CALL、
+              // hydrogen 会只回 thoughtSignature —— 那是测量假象，不是模型拒答。
+              reqObj.generationConfig = { maxOutputTokens: Number(spec.maxTokens || 8192) }
               payload.model = modelName
               try { const gc = (payload.request||{}).generationConfig; if (gc && Number(gc.maxOutputTokens) > 8192) gc.maxOutputTokens = Number(spec.maxTokens || 4096) } catch {}
               payload.requestId = 'agent/probe-' + Date.now() + '/1/probe/1'
@@ -404,18 +412,19 @@ export function createDivertServer(cfg, opts = {}) {
               },
               model: modelName,
               userAgent: 'antigravity',
-              requestType: 'agent',
-              labels: { trajectory_id: 'probe-' + Date.now(), last_step_index: '0' },
+              // 不带 labels：干净请求（无 tools/labels/sessionId）才会被当作「普通生成」，
+              // 模型才以正文作答；带 labels 时上游会走 agent 通道并要求 tools。
             }
           }
           const hdrs = lastHeaders ? { ...lastHeaders } : { authorization: lastAuth, 'content-type': 'application/json' }
           delete hdrs.host; delete hdrs['content-length']; delete hdrs['content-encoding']; delete hdrs.connection
           const t0 = Date.now()
+          say('PROBE-REQ keys=' + Object.keys(payload.request || {}).join('|') + ' genCfg=' + JSON.stringify((payload.request || {}).generationConfig || {}) + ' sysLen=' + String(((payload.request || {}).systemInstruction?.parts || [])[0]?.text || '').length)
           const r = await geminiOnce({ upstream: cfg.divert.upstream, path: '/v1internal:streamGenerateContent?alt=sse', headers: hdrs, bodyBuf: Buffer.from(JSON.stringify(payload), 'utf8') })
           const parsedText = (await import('./gemini-retry.mjs')).extractSseText(r.rawBody || r.text || '')
           if (!res.writableEnded) {
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
-            res.end(JSON.stringify({ status: r.status, ms: Date.now() - t0, finish: parsedText.finish, chars: parsedText.text.length, text: parsedText.text.slice(0, 4000), body: String(r.rawBody || '').slice(0, 800), model: modelName }))
+            res.end(JSON.stringify({ status: r.status, ms: Date.now() - t0, finish: parsedText.finish, chars: parsedText.text.length, toolCalls: (String(r.rawBody || '').match(/"functionCall"|"function_call"/g) || []).length, text: parsedText.text.slice(0, 4000), body: String(r.rawBody || '').slice(0, 800), model: modelName }))
           }
           say('PROBE ' + r.status + ' ' + (Date.now() - t0) + 'ms chars=' + parsedText.text.length + ' model=' + modelName)
         } catch (e) {
