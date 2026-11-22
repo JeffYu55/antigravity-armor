@@ -1,0 +1,19 @@
+
+#armor-dock, #armor-dock * { box-sizing: border-box; font-family: ui-monospace, Consolas, "Segoe UI", sans-serif; }
+#armor-dock { position: fixed; left: 50%; transform: translateX(-50%); bottom: 10px; z-index: 2147483000;
+  width: min(560px, 92vw); background: rgba(16,17,21,.96); color: #d6dee8; border: 1px solid rgba(16,185,129,.45);
+  border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.45); font-size: 12px; overflow: hidden; }
+#armor-dock .ad-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; user-select: none; }
+#armor-dock .ad-dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; flex: none; }
+#armor-dock .ad-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#armor-dock .ad-sub { color: #8b949e; font-size: 11px; padding: 0 10px 6px; }
+#armor-dock .ad-body { display: none; padding: 0 10px 10px; }
+#armor-dock.ad-open .ad-body { display: block; }
+#armor-dock textarea { width: 100%; height: 74px; resize: vertical; background: #171a21; color: #d6dee8;
+  border: 1px solid #2a3038; border-radius: 6px; padding: 6px; font-size: 11.5px; line-height: 1.4; }
+#armor-dock .ad-row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+#armor-dock button { background: #1f2630; color: #d6dee8; border: 1px solid #313a46; border-radius: 6px;
+  padding: 4px 9px; font-size: 11.5px; cursor: pointer; }
+#armor-dock button:hover { border-color: #10b981; }
+#armor-dock select { background: #1f2630; color: #d6dee8; border: 1px solid #313a46; border-radius: 6px; padding: 3px 6px; font-size: 11.5px; }
+#armor-dock .ad-hint { color: #8b949e; font-size: 10.5px; margin-top: 6px; min-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

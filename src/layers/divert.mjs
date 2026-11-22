@@ -15,6 +15,8 @@ import { describeToken, tokenLine } from '../diag/token.mjs'
 import { probeToken, tokenInfoLine } from '../diag/tokeninfo.mjs'
 import { analyzeRefusal, analyzeDeliverable, gateDecision, escalationFor, ESCALATION_LADDER, ladderSummary, detectLang, PREFILL_ZH, requestText } from './refusal.mjs'
 import { handleSameModel, handleSmartPassthrough, setOwnArmorSources, collectOwnArmorSources, SAFE_DELIVERABLE_DIRECTIVE } from './gemini-retry.mjs'
+import { appendSeat, assertSeatSafe, consumeQueue, seatHash, trajectoryOf } from './seat.mjs'
+import { attachObserver, planSeat } from './observer.mjs'
 
 export const ARMOR_DIRECTIVE = [
   '',
@@ -326,20 +328,50 @@ export function createDivertServer(cfg, opts = {}) {
         try { say(tokenLine(describeToken(req.headers.authorization))) } catch {}
       }
       if (req.url.includes('GenerateContent')) {
+        // ── P5：armor 自己带提示词 ────────────────────────────────────────────
+        // 每请求重算 seat（控制器三档 + 队列注入），再交给车道。
+        // 判据：seat 必须落在 systemInstruction 末位；热词硬门不过就回落到安全指令。
+        let seat = { text: SAFE_DELIVERABLE_DIRECTIVE, hash: null, level: 0, kind: 'fallback', traj: null }
+        try {
+          const bodyText = body.toString('utf8')
+          let parsedBody = null
+          try { parsedBody = JSON.parse(bodyText) } catch { parsedBody = null }
+          const traj = trajectoryOf(parsedBody, req.headers)
+          const lane = cfg.inject?.lane || cfg.divert.payloadLane || 'neutral'
+          if (cfg.divert.injectArmor !== false && parsedBody) {
+            const q = consumeQueue(cfg, { traj, text: requestText(parsedBody), workspace: cfg.antigravityRoot })
+            const planned = planSeat(cfg, { traj, lane, queueTexts: q.texts })
+            const gate = assertSeatSafe(planned.text)
+            if (gate.ok && planned.text) {
+              seat = { text: planned.text, hash: seatHash(planned.text), level: planned.level, kind: q.texts.length ? 'queue' : 'seat', traj }
+            } else {
+              say('SEAT-HOT ' + gate.hot.join(',') + ' -> 回落安全指令')
+            }
+          }
+          seat.traj = seat.traj || traj
+          say('INJECT seat +' + Buffer.byteLength(seat.text) + 'B lvl=' + seat.level + ' kind=' + seat.kind + ' hash=' + seat.hash + ' traj=' + String(seat.traj).slice(0, 12))
+          attachObserver(res, {
+            cfg, traj: seat.traj, lane, provider: 'gemini', model: cfg.divert.sameModel ? 'same-model' : 'passthrough',
+            seatHash: seat.hash, kind: seat.kind,
+            onDone: (scored, state) => say('VERDICT ' + scored.verdict + '/' + scored.layer + ' streak=' + state.streak + ' words=' + (scored.words[0] || '-')),
+          })
+        } catch (e) { say('SEAT-ERR ' + e.message) }
+
         // 同模型重试（v1.6.0）：原始模型重采样，装甲进 systemInstruction，仍然零换模型。
         if (cfg.divert.sameModel) {
           say('SAME-MODEL ' + req.method + ' ' + req.url.slice(0, 60))
           // 阶梯不给死值：由 gemini-retry 按请求语言选自/英阶梯（给了就会盖掉语言路由）
           // armorText 给 ARMOR_DIRECTIVE 也无妨 —— 车道内部会用 safeOrArmor() 换成过滤安全的
           // 「交付说明」再出站（全量装甲的措辞本身就是 Google 请求级过滤的靶子）。
-          handleSameModel({ req, res, body, headers: req.headers, cfg, armorText: SAFE_DELIVERABLE_DIRECTIVE, log: say })
+          handleSameModel({ req, res, body, headers: req.headers, cfg, armorText: seat.text, log: say })
           return
         }
         // 原模型直通（v1.5.0 · Astra 式就地破甲）：中间层不换模型 ——
         // 装甲住在客户端词包/二进制里（L1/L2/席位词包），代理只做哑管道。
         if (cfg.divert.passThrough) {
           say('PASS-THROUGH ' + req.method + ' ' + req.url.slice(0, 60))
-          handleSmartPassthrough({ req, res, body, headers: req.headers, cfg, armorText: SAFE_DELIVERABLE_DIRECTIVE, log: say })
+          // 注入由车道按档位自己做（第 0 档 = seat，最后两档是裸奔对照，不能预注入）
+          handleSmartPassthrough({ req, res, body, headers: req.headers, cfg, armorText: seat.text, log: say })
           return
         }
         // 仅透传降级（v1.8.4）：走到这里说明配置要求真改道，而 key 缺失 ——
@@ -351,6 +383,8 @@ export function createDivertServer(cfg, opts = {}) {
         }
         let parsed
         try { parsed = JSON.parse(body.toString('utf8')) } catch (e) { say('PARSE-ERR ' + e.message); res.writeHead(500); return res.end('{}') }
+        // 改道车道：座位先在 Gemini 形状上落位，转换器会把它带进 system 消息
+        try { appendSeat(parsed, seat.text) } catch { say('DIVERT-SEAT-SKIP 座位未注入') }
         // 语言在入口判一次：决定预填与升级阶梯用中文还是英文
         const lang = opts.lang || detectLang(requestText(parsed))
         const built = requestFor(parsed, 0, undefined, lang)

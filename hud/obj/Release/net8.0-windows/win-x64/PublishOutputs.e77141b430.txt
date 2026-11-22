@@ -1,0 +1,5 @@
+C:\Users\Administrator\Projects\antigravity-armor-2.34\dist\hud\ArmorHud.exe
+C:\Users\Administrator\Projects\antigravity-armor-2.34\dist\hud\ArmorHud.dll
+C:\Users\Administrator\Projects\antigravity-armor-2.34\dist\hud\ArmorHud.deps.json
+C:\Users\Administrator\Projects\antigravity-armor-2.34\dist\hud\ArmorHud.runtimeconfig.json
+C:\Users\Administrator\Projects\antigravity-armor-2.34\dist\hud\ArmorHud.pdb

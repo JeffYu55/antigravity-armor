@@ -21,6 +21,8 @@ import { probeLanguageServers } from './diag/ls.mjs'
 import { netcheck } from './diag/net.mjs'
 import { readClash, assessRouting } from './diag/clash.mjs'
 import { tcpProbe, userEnvProxy, assessLsRoute, scanLsOutageFromDisk, lsNetcheck, LS_DIRECT_HOSTS } from './diag/lsnet.mjs'
+import { readJournal, summarizeJournal } from './layers/journal.mjs'
+import { startHud, snapshot, ensureToken, tokenPath, readLane, writeLane } from './hud/control.mjs'
 
 const argv = process.argv.slice(2)
 const cmd = argv[0]
@@ -773,8 +775,132 @@ async function seatsCmd(sub) {
   throw new Error('未知子命令 ' + sub + '（list/preview/deploy/verify/restore）')
 }
 
-const commands = { status, verify, install, divert, ls, drive, rollback, ensure: ensureCmd, uninstall: uninstallCmd, armor: armorCmd, netcheck: netcheckCmd, lsnet: lsnetCmd, eval: evalCmd, probe: probeCmd, seats: seatsCmd, rules: rulesCmd }
-const SUBCOMMANDS = new Set(['divert', 'ls', 'drive', 'eval', 'probe', 'seats', 'rules', 'armor'])
+// ── journal：六态分布 + provider 归因 ────────────────────────────────────────
+function journalCmd() {
+  const tail = Number(flags.tail || 20)
+  const by = flags.by || 'provider'
+  const sum = summarizeJournal(cfg, 1000)
+  console.log('total      ' + sum.total + ' 回合   拒答率 ' + (sum.denyRate * 100).toFixed(1) + '%')
+  console.log('verdicts   ' + Object.entries(sum.byVerdict).map(([k, v]) => k + '=' + v).join('  '))
+  for (const [p, c] of Object.entries(sum.byProvider || {})) {
+    const total = Object.values(c).reduce((a, b) => a + b, 0)
+    const denied = total - (c.pass || 0)
+    console.log('  ' + p.padEnd(14) + ' total=' + String(total).padEnd(5) + ' 拒答率=' + (total ? (denied / total * 100).toFixed(1) : '0.0') + '%  ' + Object.entries(c).map(([k, v]) => k + '=' + v).join(' '))
+  }
+  console.log('')
+  console.log('最近 ' + tail + ' 条（by=' + by + '）：')
+  for (const e of readJournal(cfg, tail)) {
+    console.log('  ' + String(e.ts || '').slice(11, 19) + '  ' + String(e.verdict).padEnd(9) + String(e.layer || '').padEnd(9) + 'traj=' + String(e.traj || '-').slice(0, 14).padEnd(15) + 'chars=' + String(e.chars || 0).padEnd(6) + (e.words && e.words[0] ? 'words=' + e.words[0] : '') + (e.kind ? '  kind=' + e.kind : ''))
+  }
+}
+
+// ── hud：控制面 + 悬浮窗 ─────────────────────────────────────────────────────
+const hudPidFile = () => join(cfg.hudDir, 'control.pid')
+const hudLog = () => join(cfg.logDir, 'hud-control.log')
+
+function hudProcessAlive() {
+  try {
+    const pid = Number(readText(hudPidFile()).trim())
+    if (!pid) return false
+    process.kill(pid, 0)
+    return true
+  } catch { return false }
+}
+
+function spawnControlPlane() {
+  mkdirSync(cfg.hudDir, { recursive: true })
+  mkdirSync(cfg.logDir, { recursive: true })
+  const out = openSync(hudLog(), 'a')
+  const child = spawn(process.execPath, [join(cfg.projectRoot, 'src', 'hud', 'control.mjs'), '--port=' + (flags.port || cfg.hud.port)], {
+    cwd: cfg.projectRoot, detached: true, stdio: ['ignore', out, out], windowsHide: true,
+  })
+  writeText(hudPidFile(), String(child.pid))
+  child.unref()
+  return child.pid
+}
+
+function spawnHudWindow() {
+  const exe = join(cfg.projectRoot, 'dist', 'hud', 'ArmorHud.exe')
+  if (!existsSync(exe)) {
+    console.log('悬浮窗未构建：powershell -ExecutionPolicy Bypass -File scripts\\build-hud.ps1')
+    return null
+  }
+  const child = spawn(exe, [], { cwd: cfg.projectRoot, detached: true, stdio: 'ignore', windowsHide: false })
+  child.unref()
+  return child.pid
+}
+
+async function hudCmd(sub) {
+  const action = sub || 'status'
+  const runScript = (name, extra = []) => {
+    const r = spawnSync(process.execPath, [join(cfg.projectRoot, 'scripts', name), ...extra], { stdio: 'inherit' })
+    if (r.status !== 0) throw new Error(name + ' 退出码 ' + r.status)
+  }
+  if (action === 'embed') {
+    // 内嵌 UI：重打包 app.asar（解包目录与 NODE_OPTIONS 两条路在本机实测都起不来，见 docs/REFIT）
+    if (!hudProcessAlive()) spawnControlPlane()
+    ensureToken(cfg)
+    const out = join(cfg.projectRoot, 'build', 'app-armor.asar')
+    runScript('repack-asar.mjs', ['--inject-hud', `--out=${out}`])
+    console.log('产物: ' + out)
+    console.log('启用: node scripts/repack-asar.mjs --inject-hud --apply   （自动备份 resources/app.asar.armor-orig）')
+    console.log('回滚: copy resources\\app.asar.armor-orig resources\\app.asar')
+    return
+  }
+  if (action === 'unembed') {
+    runScript('install-embedded-hud.mjs', ['--restore', '--apply'])
+    return
+  }
+  if (action === 'floating') {
+    if (!hudProcessAlive()) spawnControlPlane()
+    const w = spawnHudWindow()
+    console.log('floating window pid ' + (w || 'none'))
+    return
+  }
+  if (action === 'start') {
+    const pid = hudProcessAlive() ? Number(readText(hudPidFile()).trim()) : spawnControlPlane()
+    console.log('control plane pid ' + pid + '  http://127.0.0.1:' + (flags.port || cfg.hud.port) + '  token=' + ensureToken(cfg).slice(0, 8) + '…')
+    return
+  }
+  if (action === 'open') {
+    if (!hudProcessAlive()) spawnControlPlane()
+    ensureToken(cfg)
+    const appDir = join(cfg.antigravityRoot, 'resources', 'app')
+    if (!existsSync(appDir)) runScript('install-embedded-hud.mjs', ['--apply'])
+    console.log('内嵌 HUD 就绪：控制面 127.0.0.1:' + (cfg.hud.port || 50101) + '，界面在 Antigravity 窗口底部 dock')
+    return
+  }
+  if (action === 'stop') {
+    try {
+      const pid = Number(readText(hudPidFile()).trim())
+      if (pid) process.kill(pid)
+      console.log('control plane stopped (pid ' + pid + ')')
+    } catch (e) { console.log('control plane 未在运行：' + e.message) }
+    return
+  }
+  if (action === 'token') { console.log(ensureToken(cfg)); return }
+  if (action === 'lane') {
+    if (positional[1]) console.log('lane -> ' + writeLane(cfg, positional[1]))
+    else console.log('lane = ' + readLane(cfg))
+    return
+  }
+  if (action === 'status') {
+    const s = snapshot(cfg, { traj: flags.traj || null })
+    console.log('control plane ' + (hudProcessAlive() ? 'up  pid=' + readText(hudPidFile()).trim() : 'down'))
+    console.log('url           http://127.0.0.1:' + (cfg.hud.port || 50101) + '   token=' + ensureToken(cfg).slice(0, 8) + '…')
+    console.log('host          ' + s.host.version + '  expectedSize=' + s.host.expectedSize)
+    console.log('layers        binary=' + (s.layers.binary.armored ? 'ARMORED' : 'not') + ' pending=' + s.layers.binary.pending + (s.layers.binary.blocked ? ' blocked=' + s.layers.binary.blocked : '') + '  ide=' + (s.layers.ide.patched ? 'patched' : 'not'))
+    console.log('divert        port=' + s.divert.port + ' lane=' + s.divert.lane + ' sameModel=' + s.divert.sameModel + ' passThrough=' + s.divert.passThrough)
+    console.log('journal       total=' + s.journal.total + ' 拒答率=' + (s.journal.denyRate * 100).toFixed(1) + '%  ' + Object.entries(s.journal.byVerdict).map(([k, v]) => k + '=' + v).join(' '))
+    console.log('seat          ' + s.seat.chars + 'B hash=' + s.seat.hash + '  queued=' + s.queued.length)
+    if (s.controller) console.log('controller    verdict=' + s.controller.verdict + ' streak=' + s.controller.streak + ' inj=' + s.controller.interventions.injections)
+    return
+  }
+  throw new Error('未知 hud 子命令 ' + action + '（start/open/stop/status/token/lane）')
+}
+
+const commands = { status, verify, install, divert, ls, drive, rollback, ensure: ensureCmd, uninstall: uninstallCmd, armor: armorCmd, netcheck: netcheckCmd, lsnet: lsnetCmd, eval: evalCmd, probe: probeCmd, seats: seatsCmd, rules: rulesCmd, journal: journalCmd, hud: hudCmd }
+const SUBCOMMANDS = new Set(['divert', 'ls', 'drive', 'eval', 'probe', 'seats', 'rules', 'armor', 'hud'])
 const handler = commands[cmd]
 if (!handler) {
   console.log(`antigravity-armor
@@ -802,6 +928,11 @@ if (!handler) {
   aarmor probe bank|measure [--attempts=N] [--target=URL] [--json]   破甲跑分（离线 mock / 真实端点）
   aarmor seats list|preview|deploy|verify|restore [--seat=gemini] [--home=DIR] [--apply]  席位词包（就地破甲，不换模型）
   aarmor rules audit|disarm [--apply] 注入位词包审计 / 摘除外来词包（每轮 <user_rules> 都从这些文件生成）
+  aarmor journal [--tail=20] [--by=provider]
+                                      六态分布 + provider 归因（含 pass 分母）
+  aarmor hud embed|unembed|open|floating|start|stop|status|token|lane [--port=50101]
+                                      内嵌 UI（默认）：解包 app.asar，把 dock 注入渲染页
+                                      floating = 旧的独立悬浮窗；start/stop 管控制面
 
 环境变量: AARMOR_LOG=debug|info|warn|error, AARMOR_LOG_FILE, ${cfg.divert.keyRef}`)
   process.exit(1)

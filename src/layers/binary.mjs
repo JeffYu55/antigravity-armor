@@ -8,7 +8,7 @@
 import { readFileSync, writeFileSync, existsSync, copyFileSync } from 'node:fs'
 import { backup, listBackups } from '../util/fs.mjs'
 import { equalLength, collectEdits, applyEdits, diffRanges, countOccurrences } from '../util/bytes.mjs'
-import { patchTable } from '../config.mjs'
+import { patchTable, assertHostShape } from '../config.mjs'
 import { saveOriginal, refreshStaleOriginal, restoreOriginal } from '../purge/hostbackups.mjs'
 import { log } from '../log.mjs'
 
@@ -77,11 +77,19 @@ export function runPasses(cfg, buf) {
   return { out: cur, report, table: t }
 }
 
-export function installBinary(cfg, { apply = false } = {}) {
+export function installBinary(cfg, { apply = false, force = false } = {}) {
   if (!existsSync(cfg.binaryPath)) throw new Error('language_server.exe not found: ' + cfg.binaryPath)
   const buf = readFileSync(cfg.binaryPath)
   const marker = Buffer.from(cfg.binary.marker, 'utf8')
   const already = buf.includes(marker)
+
+  // 宿主形状门（P3 新增）：版本/sha 对不上就停手。
+  // 理由：2.12.2 → 2.34.0 的漂移实测存在；对着陌生版本瞎打会把整段字符串写废。
+  const hostProblems = assertHostShape(cfg, buf, { armored: already })
+  if (hostProblems.length) {
+    for (const p of hostProblems) log.warn('host-shape: ' + p)
+    if (!force && !already) throw new Error('host shape mismatch (' + hostProblems.join('; ') + ') — 确认要打请带 --force')
+  }
   const { out, report } = runPasses(cfg, buf)
 
   log.info('binary: ' + cfg.binaryPath)
@@ -118,25 +126,32 @@ export function patchStatusBinary(cfg, { path = null } = {}) {
   let report = null
   try { report = runPasses(cfg, buf).report } catch { report = null }
   const pending = report ? report.edits : 0
+  const hostProblems = assertHostShape(cfg, buf, { armored })
   return {
-    layer: 'binary', exists: true, armored, pending, report,
-    blocked: !armored && pending === 0 ? 'patch-table-drift' : null,
+    layer: 'binary', exists: true, armored, pending, report, hostProblems,
+    blocked: hostProblems.length ? 'host-version-mismatch' : (!armored && pending === 0 ? 'patch-table-drift' : null),
   }
 }
 
-/** 审计：装甲标记存在 + 关键拒绝锚点消失 */
+const DEFAULT_VERIFY_PROBES = [
+  'This request was blocked', 'You are denied from interacting with this page',
+  'NEVER solve captchas', 'Is the intention of the author malicious?',
+  'flagged as malicious ONLY when', 'Runtime Policy Guardian',
+  'A command is dangerous ONLY when', 'Flag ANY of the following as malicious',
+  'Apply STRICTER evaluation', 'used in malicious code',
+  'would lead to a breach of security', 'Keep an adversarial mindset',
+  'strictly classified as a persistence threat',
+  'Action could not be verified by safety policy', 'modifying system configuration is not allowed',
+]
+
+/** 审计：装甲标记存在 + 该宿主版本的护栏锚点全部消失（探针优先取表里的 verifyProbes） */
 export function verifyBinary(cfg, path = null) {
   const buf = readFileSync(path || cfg.binaryPath)
-  const probes = [
-    'This request was blocked', 'You are denied from interacting with this page',
-    'NEVER solve captchas', 'Is the intention of the author malicious?',
-    'flagged as malicious ONLY when', 'Runtime Policy Guardian',
-    'A command is dangerous ONLY when', 'Flag ANY of the following as malicious',
-    'Apply STRICTER evaluation', 'used in malicious code',
-    'would lead to a breach of security', 'Keep an adversarial mindset',
-    'strictly classified as a persistence threat',
-    'Action could not be verified by safety policy', 'modifying system configuration is not allowed',
-  ]
+  let probes = DEFAULT_VERIFY_PROBES
+  try {
+    const t = patchTable(cfg)
+    if (Array.isArray(t.verifyProbes) && t.verifyProbes.length) probes = t.verifyProbes
+  } catch { /* 表缺失时回落默认探针 */ }
   const still = probes.filter((p) => buf.includes(Buffer.from(p, 'utf8')))
   return {
     armored: buf.includes(Buffer.from(cfg.binary.marker, 'utf8')),

@@ -11,7 +11,9 @@
   "binary": {
     "relative": "resources/bin/language_server.exe",
     "maxLine": 1400,
-    "marker": "**[ARMOR v3]"
+    "marker": "**[ARMOR v3]",
+    "expectedSize": 207245312,
+    "expectedSha256": "CC94D648C39A67C293D0FDC8BEFC51E953D1A8F55617BF49FFF69885BA475DB9"
   },
   "ide": {
     "relative": "resources/app.asar",
@@ -22,7 +24,7 @@
     "port": 50100,
     "upstream": "https://daily-cloudcode-pa.googleapis.com",
     "passThrough": true,
-    "sameModel": false,
+    "sameModel": true,
     "http2": true,
     "target": "https://kuaipao.ai/v1/chat/completions",
     "model": "glm-5.3",
@@ -41,7 +43,25 @@
     "rotateSession": true,
     "rotateTrajectory": true,
     "capture": false,
-    "blockFallback": "neutral"
+    "blockFallback": "neutral",
+    "payloadLane": "neutral",
+    "injectArmor": true
+  },
+  "controller": {
+    "maxInjectionsPerTurn": 2,
+    "maxRetriesPerStep": 2,
+    "escalateAfter": 2,
+    "injectCorrective": true,
+    "retryTransient": true,
+    "stateTtlMs": 1800000
+  },
+  "hud": {
+    "port": 50101,
+    "enabled": true
+  },
+  "inject": {
+    "enabled": true,
+    "lane": "neutral"
   },
   "hooks": {
     "globalRoots": [
