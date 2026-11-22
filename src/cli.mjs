@@ -663,6 +663,30 @@ async function armorCmd(sub) {
     if (s.updatedAt) console.log('  更新时间  : ' + s.updatedAt)
     return
   }
+  if (sub === 'set') {
+    // aarmor armor set --file=D:\path\prompt.md [--allow-hot]
+    const file = flags.file
+    if (!file) throw new Error('用法：aarmor armor set --file=<path> [--allow-hot]')
+    const { writeOverride } = await import('./layers/seat.mjs')
+    const { scanHotWords } = await import('./layers/gemini-retry.mjs')
+    const text = readText(file)
+    const hot = scanHotWords(text)
+    const bytes = Buffer.byteLength(text, 'utf8')
+    const r = writeOverride(cfg, text)
+    console.log('已写入注入位：' + r.path)
+    console.log('  来源文件  : ' + file)
+    console.log('  字节      : ' + bytes + '  ≈tokens ' + Math.round(bytes / 3.2))
+    console.log('  热词      : ' + (hot.length ? hot.join(', ') : '0'))
+    if (hot.length && !flags['allow-hot']) {
+      console.log('  ⚠ 有热词：请求级注入会被闸门拒（回落到安全指令）。')
+      console.log('    要么改词，要么在 armor.config.json 的 divert 里加 "seatAllowHot": true。')
+    } else if (hot.length) {
+      console.log('  已允许热词注入（seatAllowHot 生效需配置里有该字段）。')
+    }
+    console.log('  A 层：下一发请求即生效（divert 按 mtime 热加载）')
+    console.log('  B 层：node src/cli.mjs rollback --layer=rules && node src/cli.mjs install --layer=rules --apply')
+    return
+  }
   if (sub === 'edit') {
     const r = armorEdit(cfg)
     console.log('已建立用户副本：' + r.user)

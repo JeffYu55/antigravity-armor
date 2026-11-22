@@ -7,6 +7,7 @@ import { extractSseText } from './gemini-retry.mjs'
 import { scoreResponse } from './scorer3.mjs'
 import { loadState, saveState, observeVerdict, beginTurn, beginStep, planInjection, buildSeatText, noteInjection, summarize } from './controller.mjs'
 import { appendJournal, buildEntry, tailForTraj } from './journal.mjs'
+import { currentSeat } from './seat.mjs'
 
 /**
  * @param {import('node:http').ServerResponse} res
@@ -86,7 +87,11 @@ export function planSeat(cfg, { traj, lane = 'neutral', queueTexts = [], extra =
   const level = plan.act === 'inject' ? plan.level : 0
   if (plan.act === 'inject') noteInjection(state)
   saveState(cfg, state)
+  // 三层拼接：① 座位正文（覆盖位 > 车道种子，齿轮「应用」写的就是它）
+  //           ② 动态锚点（常态/纠正/强纠正）
+  //           ③ 队列注入（once / ttl / 条件）
+  const base = currentSeat(cfg, lane)
   const dynamic = buildSeatText(state, level, { extra })
-  const parts = [dynamic, ...queueTexts.filter(Boolean)]
-  return { text: parts.join('\n'), level, plan, state: summarize(state) }
+  const parts = [base, dynamic, ...queueTexts.filter(Boolean)].filter(Boolean)
+  return { text: parts.join('\n\n'), level, plan, state: summarize(state), baseBytes: base.length, dynamicBytes: dynamic.length }
 }

@@ -45,7 +45,8 @@
     "capture": false,
     "blockFallback": "neutral",
     "payloadLane": "neutral",
-    "injectArmor": true
+    "injectArmor": true,
+    "seatAllowHot": true
   },
   "controller": {
     "maxInjectionsPerTurn": 2,

@@ -342,10 +342,12 @@ export function createDivertServer(cfg, opts = {}) {
             const q = consumeQueue(cfg, { traj, text: requestText(parsedBody), workspace: cfg.antigravityRoot })
             const planned = planSeat(cfg, { traj, lane, queueTexts: q.texts })
             const gate = assertSeatSafe(planned.text)
-            if (gate.ok && planned.text) {
+            const allowHot = cfg.divert.seatAllowHot === true
+            if (planned.text && (gate.ok || allowHot)) {
+              if (!gate.ok) say('SEAT-HOT-ALLOWED ' + gate.hot.join(',') + '（seatAllowHot=true，上游过滤风险由你担）')
               seat = { text: planned.text, hash: seatHash(planned.text), level: planned.level, kind: q.texts.length ? 'queue' : 'seat', traj }
             } else {
-              say('SEAT-HOT ' + gate.hot.join(',') + ' -> 回落安全指令')
+              say('SEAT-HOT ' + gate.hot.join(',') + ' -> 回落安全指令（要强制注入把 divert.seatAllowHot 设成 true）')
             }
           }
           seat.traj = seat.traj || traj
