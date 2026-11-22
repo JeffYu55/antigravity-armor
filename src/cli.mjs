@@ -860,6 +860,47 @@ async function hudCmd(sub) {
     const r = spawnSync(process.execPath, [join(cfg.projectRoot, 'scripts', name), ...extra], { stdio: 'inherit' })
     if (r.status !== 0) throw new Error(name + ' 退出码 ' + r.status)
   }
+  if (action === 'watch') {
+    // 常驻看门狗：页面在、端口开、齿轮不在 → 自动 attach（重启 Antigravity 后齿轮自动回来）
+    const interval = Number(flags.interval || 15) * 1000
+    const { attachAll } = await import('./hud/cdp.mjs')
+    if (!hudProcessAlive()) spawnControlPlane()
+    const token = ensureToken(cfg)
+    const logFile = join(cfg.logDir, 'hud-watch.log')
+    const say = (m) => { try { appendFileSync(logFile, new Date().toISOString() + ' ' + m + '\n') } catch { /* 忽略 */ } }
+    say('watch start interval=' + interval)
+    if (flags.once) {
+      try {
+        const rows = await attachAll(cfg, token, { port: Number(flags.port || 9222) })
+        for (const r of rows) say((r.ok ? 'ok ' : 'fail ') + r.url)
+        console.log(rows.length ? rows.map((r) => (r.ok ? 'ok   ' : 'fail ') + r.url).join('\n') : '没有可注入页面（应用是否带 --remote-debugging-port 启动？）')
+      } catch (e) { console.log('attach 失败：' + e.message) }
+      return
+    }
+    // 脱离父进程常驻
+    if (!flags.foreground) {
+      const out = openSync(logFile, 'a')
+      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'hud', 'watch', '--foreground', '--interval=' + (flags.interval || 15)], {
+        cwd: cfg.projectRoot, detached: true, stdio: ['ignore', out, out], windowsHide: true,
+      })
+      child.unref()
+      writeText(join(cfg.hudDir, 'watch.pid'), String(child.pid))
+      console.log('watch 已后台启动 pid ' + child.pid + '  日志 ' + logFile)
+      return
+    }
+    for (;;) {
+      try {
+        const rows = await attachAll(cfg, token, { port: Number(flags.port || 9222) })
+        if (rows.length) say('attached ' + rows.map((r) => (r.ok ? 'ok' : 'fail') + ':' + r.url).join(' '))
+      } catch (e) { say('idle ' + e.message) }
+      await new Promise((r) => setTimeout(r, interval))
+    }
+  }
+  if (action === 'fix-shortcuts') {
+    const r = spawnSync(process.execPath, [join(cfg.projectRoot, 'scripts', 'fix-shortcuts.mjs')], { stdio: 'inherit' })
+    if (r.status !== 0) throw new Error('fix-shortcuts 退出码 ' + r.status)
+    return
+  }
   if (action === 'attach') {
     const { attachAll } = await import('./hud/cdp.mjs')
     if (!hudProcessAlive()) spawnControlPlane()
