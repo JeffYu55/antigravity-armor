@@ -46,7 +46,11 @@
     "blockFallback": "neutral",
     "payloadLane": "neutral",
     "injectArmor": true,
-    "seatAllowHot": false
+    "seatAllowHot": false,
+    "modelRemap": {
+      "gemini-4-neon-medium": "gemini-4-argon",
+      "gemini-4-neon": "gemini-4-argon"
+    }
   },
   "controller": {
     "maxInjectionsPerTurn": 2,

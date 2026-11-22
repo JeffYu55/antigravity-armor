@@ -6,7 +6,7 @@
 import http from 'node:http'
 import https from 'node:https'
 import { URL } from 'node:url'
-import { createWriteStream, mkdirSync } from 'node:fs'
+import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { geminiToOpenAI, geminiEvent, createStreamAccumulator } from '../proto/convert.mjs'
 import { resolveKey } from '../credentials.mjs'
@@ -417,7 +417,7 @@ export function createDivertServer(cfg, opts = {}) {
           // 客户端自己会解析错误体，保持原样透传即可；只加日志定位。
           say('PASS-QUOTA 429 上游额度用尽（账号接口）—— 账号侧配额，不是链路问题。')
         }
-        // 模型清单：记下 GUI 到底拿到哪些模型（换模型档要用真实名字）
+        // 模型清单：记下 GUI 到底拿到哪些模型（换模型档要用真实名字），并落一份原文备查
         if (/fetchAvailableModels/i.test(String(req.url))) {
           const chunks = []
           pres.on('data', (c) => chunks.push(c))
@@ -426,7 +426,12 @@ export function createDivertServer(cfg, opts = {}) {
               const raw = Buffer.concat(chunks).toString('utf8')
               const names = [...raw.matchAll(/"model"\s*:\s*"([^"]+)"/g)].map((m) => m[1])
               const uniq = [...new Set(names)]
-              if (uniq.length) say('MODELS ' + uniq.length + ': ' + uniq.slice(0, 12).join(', '))
+              if (uniq.length) say('MODELS ' + uniq.length + ': ' + uniq.slice(0, 20).join(', '))
+              try {
+                mkdirSync(cfg.captureDir, { recursive: true })
+                writeFileSync(join(cfg.captureDir, 'models.json'), raw)
+                say('MODELS-DUMP ' + Buffer.byteLength(raw, 'utf8') + 'B -> ' + join(cfg.captureDir, 'models.json'))
+              } catch { /* 忽略 */ }
             } catch { /* 忽略 */ }
           })
         }
