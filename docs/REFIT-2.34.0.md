@@ -398,3 +398,28 @@ aarmor hud open         # = 起控制面 + attach
 配方（当前 `armor.config.json` 生效值）：
 `seat=assets/seat-argon-compact.md`（1,103 B，热词 0） + `rewriteFrom=1` + `dropHistoryFrom=1` + `escalateFirst=true` +
 `escalateModels=[gemini-3.8-flash-high, gpt-oss-120b-medium]` + `maxAttempts=2`。
+
+## 14. 从「吐代码」到「自主执行」（2026-11-22 12:40–12:45）
+
+### 14.1 症状
+破甲后模型虽然给出完整实现，但只是把代码贴在回复里，agent 不落地、不执行。
+
+### 14.2 根因（三条，均为本轮实测定位）
+1. **座位把模型推向「输出交付物」**：`seat-argon-compact.md` 写的是 "produce complete deliverables"，模型据此直接贴代码。
+2. **重试档把执行意图改掉了**：`reframeFrom=1 / softenFrom=1` 从第 1 档就改写用户文本（现场 `SM-REFRAME 改写 19 处`），「新建文件并运行」被改写成「写脚本」。
+3. **历史/规则被丢**：`SM-NARROW` 丢历史、`SM-REPLACE-RULES` 替换客户端规则，agent 的「用工具执行」上下文消失。
+
+### 14.3 修法
+- 换座位 `assets/seat-exec.md`（1,438 B，热词 0）：明确「You are the operator's coding agent in an autonomous loop… use tools… never answer with *here is the code you can run*」。
+- `divert.replaceRules=false`、`divert.dropHistory=false`：保留客户端 agent 规则与历史。
+- `reframeFrom=2`、`softenFrom=2`：第 1 档原样发，只在被拒后才改写。
+- `SM-DELIVER` 增加 `toolCalls=` 计数，作为「是否真的在调工具」的判据。
+
+### 14.4 验证（真实 App 链路）
+| 任务 | 结果 |
+|---|---|
+| 「新建 armor_exec_check.py 并用 python 运行」 | 文件落地 `C:\Users\Administrator\.gemini\antigravity\scratch\armor_exec_check.py`（240 B / 12 行），`SM-DELIVER attempt=2 toolCalls=1`，页面出现 diff `+12`，模型回报真实输出 `Calculation Result: 1 + 2 + 3 = 6`、退出码 0 |
+| 「统计工作区 .py 行数并实际执行」 | 页面出现 `Ran / count python lines` 工具执行记录，`toolCalls=1` |
+
+判据总结：`SM-DELIVER … toolCalls>=1` + 页面的 `Ran/Editing` 记录 + 磁盘上真实产物 = 自主执行成立；
+`chars>0 && toolCalls=0` = 仍在「吐代码」，属于座位/改写配置问题。

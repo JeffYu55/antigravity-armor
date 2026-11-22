@@ -1601,7 +1601,11 @@ export async function handleSameModel({ req, res, body, headers, cfg, armorText,
       continue
     }
     if (verdict.refusal && spent) log('SM-EXHAUSTED delivering refusal buffer')
-    else log('SM-DELIVER attempt=' + a + ' chars=' + r.text.length + ' finish=' + r.finish)
+    else {
+      // 工具调用是「自主执行」的判据：模型必须回 functionCall，而不是把代码贴在正文里
+      const toolCalls = (String(r.rawBody || '').match(/"functionCall"|"function_call"/g) || []).length
+      log('SM-DELIVER attempt=' + a + ' chars=' + r.text.length + ' finish=' + r.finish + ' toolCalls=' + toolCalls)
+    }
     writeSse(res, r.rawLines)
     return res.end()
   }

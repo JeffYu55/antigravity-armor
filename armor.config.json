@@ -51,17 +51,19 @@
       "gemini-4-neon-medium": "gemini-4-argon",
       "gemini-4-neon": "gemini-4-argon"
     },
-    "reframeFrom": 1,
-    "softenFrom": 1,
+    "reframeFrom": 2,
+    "softenFrom": 2,
     "templateFrom": 2,
     "escalateModel": "gemini-3.8-flash-high",
-    "rewriteFrom": 1,
-    "escalateFirst": true,
+    "rewriteFrom": 2,
+    "escalateFirst": false,
     "dropHistoryFrom": 1,
     "escalateModels": [
       "gemini-3.8-flash-high",
       "gpt-oss-120b-medium"
-    ]
+    ],
+    "replaceRules": false,
+    "dropHistory": false
   },
   "controller": {
     "maxInjectionsPerTurn": 2,
