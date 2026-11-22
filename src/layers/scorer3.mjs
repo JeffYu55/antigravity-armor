@@ -145,7 +145,8 @@ export function scoreResponse(text, opts = {}) {
   const fallback = matchedWithIndex(raw, FALLBACK_MARKERS).map((x) => x.marker)
   const tailSlice = folded(raw.slice(Math.max(0, raw.length - TAIL_WINDOW)))
   const tailDeclaration = TAIL_DECLARATION_MARKERS.some((m) => tailSlice.includes(folded(m)))
-  const blocked = len < 120 && hasAny(raw, BLOCK_MARKERS)
+  // 上游过滤器回的是 HTTP 200 + 一段固定话术 —— 长度可能 350+ 字，不能只看短文本
+  const blocked = hasAny(raw, BLOCK_MARKERS)
   const empty = len === 0
   const truncated = opts.interrupted === true || opts.finishKind === 'aborted' || opts.finishKind === 'length' || opts.finishKind === 'MAX_TOKENS'
   const deliverable = analyzeDeliverable(raw)

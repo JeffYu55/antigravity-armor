@@ -36,7 +36,7 @@
     "prefillFrom": 2,
     "jitter": true,
     "jitterStep": 0.15,
-    "maxAttempts": 3,
+    "maxAttempts": 2,
     "narrowKeepTurns": 2,
     "narrowToolChars": 600,
     "narrowMaxContents": 40,
@@ -50,7 +50,10 @@
     "modelRemap": {
       "gemini-4-neon-medium": "gemini-4-argon",
       "gemini-4-neon": "gemini-4-argon"
-    }
+    },
+    "reframeFrom": 1,
+    "softenFrom": 1,
+    "templateFrom": 2
   },
   "controller": {
     "maxInjectionsPerTurn": 2,
