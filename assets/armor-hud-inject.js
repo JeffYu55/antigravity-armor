@@ -1,11 +1,7 @@
-// armor HUD 注入器（主进程侧）—— P8' 内嵌 UI
+// armor HUD 注入器（主进程 / CDP 共用同一份 pageMain）
 //
-// 与「悬浮窗」的区别：这不是独立窗口，而是注入到 Antigravity 自己的渲染页里，
-// 贴在输入区上方的一条 dock（和富江在 DSH 里的 badge 同一个位置语义）。
-//
-// 为什么走主进程注入而不是 preload：宿主窗口是 sandbox:true + contextIsolation:true，
-// preload 里拿不到 fs（读不到控制面 token）；主进程有 Node，可以用
-// webContents.insertCSS / executeJavaScript 把 DOM 打进页面主世界。
+// UI 形态按用户要求：**对话框上方一枚小齿轮**（在文档流里，不遮挡任何元素），
+// 点齿轮弹出小面板，面板里只有三个动作：应用 / 取消 / 恢复默认。
 'use strict'
 
 const { app, webContents } = require('electron')
@@ -18,7 +14,6 @@ const DEFAULTS = {
   projectRoot: process.env.AARMOR_ROOT || '',
 }
 
-/** 由安装脚本写在 dist/armor-hud.json：{ base, tokenFile } */
 function readSidecar() {
   try {
     const p = path.join(__dirname, 'armor-hud.json')
@@ -38,7 +33,6 @@ function readToken() {
     DEFAULTS.tokenFile,
     side.tokenFile,
     side.projectRoot ? path.join(side.projectRoot, 'state', 'hud', 'token.txt') : '',
-    DEFAULTS.projectRoot ? path.join(DEFAULTS.projectRoot, 'state', 'hud', 'token.txt') : '',
     'C:\\Users\\Administrator\\Projects\\antigravity-armor-2.34\\state\\hud\\token.txt',
   ].filter(Boolean)
   for (const p of cands) {
@@ -48,140 +42,188 @@ function readToken() {
 }
 
 const CSS = `
-#armor-dock, #armor-dock * { box-sizing: border-box; font-family: ui-monospace, Consolas, "Segoe UI", sans-serif; }
-#armor-dock { position: fixed; left: 50%; transform: translateX(-50%); bottom: 10px; z-index: 2147483000;
-  width: min(560px, 92vw); background: rgba(16,17,21,.96); color: #d6dee8; border: 1px solid rgba(16,185,129,.45);
-  border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.45); font-size: 12px; overflow: hidden; }
-#armor-dock .ad-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; user-select: none; }
-#armor-dock .ad-dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; flex: none; }
-#armor-dock .ad-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#armor-dock .ad-sub { color: #8b949e; font-size: 11px; padding: 0 10px 6px; }
-#armor-dock .ad-body { display: none; padding: 0 10px 10px; }
-#armor-dock.ad-open .ad-body { display: block; }
-#armor-dock textarea { width: 100%; height: 74px; resize: vertical; background: #171a21; color: #d6dee8;
-  border: 1px solid #2a3038; border-radius: 6px; padding: 6px; font-size: 11.5px; line-height: 1.4; }
-#armor-dock .ad-row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
-#armor-dock button { background: #1f2630; color: #d6dee8; border: 1px solid #313a46; border-radius: 6px;
-  padding: 4px 9px; font-size: 11.5px; cursor: pointer; }
-#armor-dock button:hover { border-color: #10b981; }
-#armor-dock select { background: #1f2630; color: #d6dee8; border: 1px solid #313a46; border-radius: 6px; padding: 3px 6px; font-size: 11.5px; }
-#armor-dock .ad-hint { color: #8b949e; font-size: 10.5px; margin-top: 6px; min-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#armor-gear-host { position: relative; display: flex; justify-content: flex-end; align-items: center;
+  height: 22px; margin: 0 2px 2px; pointer-events: none; }
+#armor-gear-host > * { pointer-events: auto; }
+#armor-gear { width: 20px; height: 20px; border-radius: 50%; border: 1px solid rgba(120,130,145,.45);
+  background: rgba(20,22,28,.85); color: #9aa7b5; font-size: 12px; line-height: 18px; text-align: center;
+  cursor: pointer; padding: 0; user-select: none; transition: transform .12s ease, color .12s ease; }
+#armor-gear:hover { color: #e6edf3; border-color: #10b981; transform: rotate(18deg); }
+#armor-gear .dot { position: absolute; right: -2px; top: -2px; width: 6px; height: 6px; border-radius: 50%;
+  background: #10b981; box-shadow: 0 0 6px rgba(16,185,129,.8); }
+#armor-panel { position: absolute; right: 0; bottom: calc(100% + 6px); width: 430px; max-width: 90vw;
+  background: #12141a; color: #d6dee8; border: 1px solid rgba(16,185,129,.35); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.45); padding: 10px; font-family: ui-monospace, Consolas, "Segoe UI", sans-serif;
+  font-size: 12px; z-index: 2147483000; display: none; }
+#armor-panel.open { display: block; }
+#armor-panel .ttl { color: #8b949e; font-size: 11px; margin-bottom: 6px; display: flex; justify-content: space-between; }
+#armor-panel textarea { width: 100%; height: 96px; resize: vertical; background: #171a21; color: #d6dee8;
+  border: 1px solid #2a3038; border-radius: 6px; padding: 6px; font-size: 11.5px; line-height: 1.45; }
+#armor-panel .row { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
+#armor-panel button { background: #1f2630; color: #d6dee8; border: 1px solid #313a46; border-radius: 6px;
+  padding: 4px 12px; font-size: 11.5px; cursor: pointer; }
+#armor-panel button.primary { border-color: #10b981; color: #b9f5da; }
+#armor-panel button:hover { border-color: #10b981; }
+#armor-panel .hint { color: #8b949e; font-size: 10.5px; margin-top: 6px; min-height: 14px; }
 `
 
-/** 页面内代码（序列化后注入主世界；不要引用外部变量） */
+/** 页面内代码：在输入区上方挂一枚齿轮，点开是三按钮面板 */
 function pageMain(cfg) {
-  if (window.__armorDockInstalled) return
-  window.__armorDockInstalled = true
+  if (window.__armorGearInstalled) { if (window.__armorGearSync) window.__armorGearSync(); return }
+  window.__armorGearInstalled = true
   var base = cfg.base
   var token = cfg.token || ''
-  var lane = 'neutral'
   var open = false
   var lastText = ''
+  var panelEl = null
+  var hostEl = null
+  var gearEl = null
+  var taEl = null
+  var hintEl = null
+  var dotEl = null
 
-  function el(tag, cls, text) {
-    var d = document.createElement(tag)
-    if (cls) d.className = cls
-    if (text != null) d.textContent = text
-    return d
-  }
   function api(path, opts) {
     opts = opts || {}
     opts.headers = Object.assign({ 'X-Armor-Token': token }, opts.body ? { 'Content-Type': 'application/json' } : {})
-    return fetch(base + path, opts).then(function (r) { return r.text().then(function (t) { return { ok: r.ok, code: r.status, body: t } }) })
+    opts.cache = 'no-store'
+    return fetch(base + path, opts)
   }
-  function setDot(dock, color) { dock.querySelector('.ad-dot').style.background = color }
 
-  var dock = el('div')
-  dock.id = 'armor-dock'
-  var head = el('div', 'ad-head')
-  var dot = el('span', 'ad-dot')
-  var title = el('span', 'ad-title', 'armor · 连接中…')
-  var caret = el('span', null, '▾')
-  head.appendChild(dot); head.appendChild(title); head.appendChild(caret)
-  var sub = el('div', 'ad-sub', '')
-  var body = el('div', 'ad-body')
-  var ta = el('textarea')
-  ta.placeholder = '在这里写要注入的提示词（会追加到 systemInstruction 末位）'
-  var row1 = el('div', 'ad-row')
-  var bApply = el('button', null, '应用(持久)')
-  var bOnce = el('button', null, '注入一次')
-  var bTtl = el('button', null, '注入10min')
-  var bReset = el('button', null, '恢复默认')
-  row1.appendChild(bApply); row1.appendChild(bOnce); row1.appendChild(bTtl); row1.appendChild(bReset)
-  var row2 = el('div', 'ad-row')
-  var sel = el('select')
-  ;['neutral', 'armor'].forEach(function (v) { var o = el('option', null, v); o.value = v; sel.appendChild(o) })
-  var bProbe = el('button', null, 'probe')
-  var bHide = el('button', null, '收起')
-  row2.appendChild(sel); row2.appendChild(bProbe); row2.appendChild(bHide)
-  var hint = el('div', 'ad-hint', '')
-  body.appendChild(ta); body.appendChild(row1); body.appendChild(row2); body.appendChild(hint)
-  dock.appendChild(head); dock.appendChild(sub); dock.appendChild(body)
+  /** 找输入框：可见、面积最大的 textarea / contenteditable */
+  function findComposer() {
+    var cands = [].slice.call(document.querySelectorAll('textarea, [contenteditable="true"]'))
+    var best = null
+    var bestArea = 0
+    for (var i = 0; i < cands.length; i++) {
+      var n = cands[i]
+      var r = n.getBoundingClientRect()
+      if (r.width < 80 || r.height < 12) continue
+      var st = getComputedStyle(n)
+      if (st.display === 'none' || st.visibility === 'hidden') continue
+      var area = r.width * r.height
+      if (area > bestArea) { bestArea = area; best = n }
+    }
+    return best
+  }
 
+  /** 齿轮宿主插到输入框「所在块」的上方（文档流，不遮挡） */
   function mount() {
-    if (!document.body) return
-    if (!document.getElementById('armor-dock')) document.body.appendChild(dock)
-  }
-  mount()
-  new MutationObserver(function () { mount() }).observe(document.documentElement, { childList: true, subtree: true })
+    if (document.getElementById('armor-gear-host')) return true
+    var composer = findComposer()
+    if (!composer) return false
+    // 往上找到「输入卡片」：高度还小、但父级已经是整列（>=200px）的那一层。
+    // 齿轮插在卡片**前面**，因此它在文档流里、位于对话框上方，不压任何元素。
+    var node = composer
+    var card = composer
+    while (node && node.parentElement) {
+      var r = node.getBoundingClientRect()
+      if (r.height >= 200) break
+      card = node
+      node = node.parentElement
+    }
+    var host = document.createElement('div')
+    host.id = 'armor-gear-host'
+    var gear = document.createElement('button')
+    gear.id = 'armor-gear'
+    gear.title = 'armor 座位（点开设置注入提示词）'
+    gear.textContent = '⚙'
+    var dot = document.createElement('span')
+    dot.className = 'dot'
+    dot.style.background = '#8b949e'
+    gear.appendChild(dot)
+    host.appendChild(gear)
 
-  head.addEventListener('click', function () {
-    open = !open
-    dock.classList.toggle('ad-open', open)
-    caret.textContent = open ? '▴' : '▾'
-    if (open) loadSeat()
-  })
-  bHide.addEventListener('click', function () {
-    open = false; dock.classList.remove('ad-open'); caret.textContent = '▾'
-  })
+    var panel = document.createElement('div')
+    panel.id = 'armor-panel'
+    var ttl = document.createElement('div')
+    ttl.className = 'ttl'
+    ttl.innerHTML = '<span>armor 座位注入</span><span class="st">待判定</span>'
+    var ta = document.createElement('textarea')
+    ta.placeholder = '写要追加到 systemInstruction 末位的提示词'
+    var row = document.createElement('div')
+    row.className = 'row'
+    var bApply = document.createElement('button')
+    bApply.className = 'primary'
+    bApply.textContent = '应用'
+    var bCancel = document.createElement('button')
+    bCancel.textContent = '取消'
+    var bReset = document.createElement('button')
+    bReset.textContent = '恢复默认'
+    row.appendChild(bApply); row.appendChild(bCancel); row.appendChild(bReset)
+    var hint = document.createElement('div')
+    hint.className = 'hint'
+    panel.appendChild(ttl); panel.appendChild(ta); panel.appendChild(row); panel.appendChild(hint)
+    host.appendChild(panel)
 
-  function flash(msg) { hint.textContent = msg; }
+    if (card.parentElement) card.parentElement.insertBefore(host, card)
+    else document.body.insertBefore(host, document.body.firstChild)
 
-  function refresh() {
-    api('/api/state').then(function (r) {
-      if (!r.ok) { title.textContent = 'armor · 控制面离线（aarmor hud start）'; dot.style.background = '#8b949e'; return }
-      var s = JSON.parse(r.body)
-      var v = s.controller && s.controller.verdict ? s.controller.verdict : null
-      var label = v === 'pass' ? '已交付' : v === 'refusal' ? '拒答' : v === 'fallback' ? '软拒答'
-        : v === 'blocked' ? '网关拦截' : v === 'truncated' ? '流截断' : v === 'empty' ? '空响应' : '待判定'
-      var color = v === 'pass' ? '#10b981' : v === 'refusal' ? '#ef4444' : v ? '#f59e0b' : '#10b981'
-      dot.style.background = color
-      var extra = ''
-      if (s.controller && s.controller.streak > 1) extra += ' · 连续' + s.controller.streak
-      if (s.controller && s.controller.interventions && s.controller.interventions.injections) extra += ' · 纠正x' + s.controller.interventions.injections
-      title.textContent = 'armor · ' + label + extra
-      var layers = (s.layers.binary && s.layers.binary.armored ? '●' : '○') + (s.layers.ide && s.layers.ide.patched ? '●' : '○')
-      sub.textContent = '宿主 ' + s.host.version + ' · 层 ' + layers + ' · 车道 ' + s.divert.lane + ' · 队列 ' + s.queued.length
-      lane = s.divert.lane
-      sel.value = lane
-    }).catch(function () { title.textContent = 'armor · 控制面离线'; dot.style.background = '#8b949e' })
+    hostEl = host; gearEl = gear; panelEl = panel; taEl = ta; hintEl = hint; dotEl = dot
+
+    gear.addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation()
+      open = !open
+      panel.classList.toggle('open', open)
+      if (open) loadSeat()
+    })
+    bCancel.addEventListener('click', function () { open = false; panel.classList.remove('open'); ta.value = lastText })
+    bApply.addEventListener('click', function () {
+      var text = ta.value
+      api('/api/seat', { method: 'POST', body: JSON.stringify({ text: text }) }).then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { hint.textContent = '应用失败：' + t.slice(0, 100) })
+        lastText = text
+        hint.textContent = '已应用（每轮注入）'
+        setTimeout(function () { open = false; panel.classList.remove('open') }, 500)
+      }).catch(function (e2) { hint.textContent = '应用失败：' + e2.message })
+    })
+    bReset.addEventListener('click', function () {
+      api('/api/seat/reset', { method: 'POST', body: '{}' }).then(function (r) {
+        if (!r.ok) { hint.textContent = '恢复失败 ' + r.status; return }
+        return loadSeat().then(function () { hint.textContent = '已恢复默认种子' })
+      }).catch(function (e2) { hint.textContent = '恢复失败：' + e2.message })
+    })
+    document.addEventListener('click', function (e) {
+      if (!open) return
+      if (host.contains(e.target)) return
+      open = false; panel.classList.remove('open')
+    }, true)
+    return true
   }
 
   function loadSeat() {
-    api('/api/seat').then(function (r) {
+    return api('/api/seat').then(function (r) {
       if (!r.ok) return
-      var j = JSON.parse(r.body)
-      lastText = j.text || ''
-      if (document.activeElement !== ta) ta.value = lastText
+      return r.json().then(function (j) {
+        lastText = j.text || ''
+        if (document.activeElement !== taEl) taEl.value = lastText
+      })
     }).catch(function () {})
   }
 
-  function post(path, payload, okMsg) {
-    api(path, { method: 'POST', body: JSON.stringify(payload) }).then(function (r) {
-      if (!r.ok) { flash('失败 ' + r.code + ': ' + r.body.slice(0, 120)); return }
-      flash(okMsg); refresh()
-    }).catch(function (e) { flash('失败: ' + e.message) })
+  function refresh() {
+    api('/api/state').then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status)
+      return r.json()
+    }).then(function (s) {
+      var v = s.controller && s.controller.verdict ? s.controller.verdict : null
+      var color = v === 'refusal' ? '#ef4444' : (v && v !== 'pass') ? '#f59e0b' : '#10b981'
+      if (dotEl) dotEl.style.background = color
+      var st = panelEl ? panelEl.querySelector('.st') : null
+      if (st) st.textContent = '宿主 ' + s.host.version + ' · ' + (s.divert ? s.divert.lane : '-')
+      if (hintEl && !hintEl.textContent) hintEl.textContent = ''
+    }).catch(function () { if (dotEl) dotEl.style.background = '#8b949e' })
   }
 
-  bApply.addEventListener('click', function () { post('/api/seat', { text: ta.value }, '已应用（每轮注入）') })
-  bOnce.addEventListener('click', function () { post('/api/inject', { text: ta.value, mode: 'once' }, '已排队（下一发生效）') })
-  bTtl.addEventListener('click', function () { post('/api/inject', { text: ta.value, mode: 'ttl', ttlSec: 600 }, '已排队（10 分钟内每轮生效）') })
-  bReset.addEventListener('click', function () { post('/api/seat/reset', {}, '已恢复默认种子'); setTimeout(loadSeat, 300) })
-  bProbe.addEventListener('click', function () { post('/api/probe', { attempts: 2 }, '已开始跑分（离线 mock）') })
-  sel.addEventListener('change', function () { post('/api/lane', { lane: sel.value }, '车道已切换为 ' + sel.value) })
-
+  window.__armorGearSync = function () { mount(); loadSeat() }
+  if (!mount()) {
+    var tries = 0
+    var timer = setInterval(function () {
+      tries++
+      if (mount() || tries > 60) { clearInterval(timer); loadSeat(); refresh() }
+    }, 500)
+  } else { loadSeat() }
   refresh()
-  setInterval(refresh, 2500)
+  setInterval(refresh, 5000)
 }
 
 function install() {
@@ -189,7 +231,6 @@ function install() {
   const cfg = { base: DEFAULTS.base, token }
   const page = '(' + pageMain.toString() + ')(' + JSON.stringify(cfg) + ')'
   const hooked = new WeakSet()
-
   const hook = (wc) => {
     if (!wc || hooked.has(wc)) return
     hooked.add(wc)
@@ -199,7 +240,7 @@ function install() {
         if (!/^https?:/i.test(url)) return
         wc.insertCSS(CSS).catch(() => {})
         wc.executeJavaScript(page, true).then(() => logLine('injected ' + url)).catch((e) => logLine('inject-fail ' + url + ' ' + (e && e.message)))
-      } catch { /* 注入失败不影响宿主 */ }
+      } catch { /* 忽略 */ }
     }
     try {
       wc.on('did-finish-load', inject)
@@ -207,11 +248,9 @@ function install() {
       if (wc.getURL && /^https?:/i.test(wc.getURL())) inject()
     } catch { /* 忽略 */ }
   }
-
   try { app.on('web-contents-created', (_e, wc) => hook(wc)) } catch { /* 忽略 */ }
   try { webContents.getAllWebContents().forEach(hook) } catch { /* 忽略 */ }
-  logLine('install token=' + (token ? token.slice(0, 6) + '…' : '(missing)') + ' base=' + DEFAULTS.base)
-  try { console.log('[armor-hud] installed, token=' + (token ? token.slice(0, 6) + '…' : '(missing)')) } catch { /* 忽略 */ }
+  logLine('install token=' + (token ? token.slice(0, 6) + '…' : '(missing)'))
 }
 
 module.exports = { install, readToken, CSS, pageMain }

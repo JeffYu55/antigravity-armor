@@ -280,3 +280,48 @@ Copy-Item C:\Users\Administrator\AppData\Local\Programs\antigravity\resources\ap
 3. dock 只在 http(s) 页面注入；`AGY Desktop HUD`、Passkeys 这类 aux 窗口会被跳过（它们不是 Hub UI）。
 4. 页面重渲染时靠 `MutationObserver` 重新挂载；若宿主改成 Shadow DOM 顶层容器，需要再适配一次。
 
+---
+
+## 11. 内嵌 UI 最终形态：对话框上方一枚齿轮（v2.4）
+
+用户要求：像富江那样只要一个小图标、在对话框上方、不遮挡任何元素；点开是一个小面板，
+里头只有 **应用 / 取消 / 恢复默认** 三个动作。已实现并实测：
+
+![齿轮面板](build/gear-panel.png)
+
+- 齿轮挂在输入卡片**前面**（文档流），右对齐，20×20，`pointer-events` 只给按钮本身，
+  因此不压输入框、不压发送按钮、不压模型选择器。
+- 齿轮右上角有个 6px 状态点（绿=已交付 / 橙=软拒/网关 / 红=拒答 / 灰=控制面离线）。
+- 点开面板：标题「armor 座位注入」+ 右侧「宿主 2.34.0 · 车道」，中间是当前座位全文，
+  底部三个按钮：**应用**（POST /api/seat，每轮注入）/ **取消**（丢弃编辑、回读原值）/
+  **恢复默认**（POST /api/seat/reset，回落到 `assets/seat-neutral.md` 种子）。
+- 点面板外自动收起；SPA 重渲染时用 500ms 轮询 + 插入检测自动补挂。
+
+实测（CDP 真实页面）：
+
+```
+gear=[848,881,20,22]   buttons=["应用","取消","恢复默认"]
+panelOpen=true         panel z-index 2147483000
+dock 文案：armor · 待判定 / 宿主 2.34.0 · 层 ●● · 车道 neutral · 队列 0
+控制面日志：每 2s 一条 GET /api/state（来自页面里的齿轮，不是别的进程）
+```
+
+### 注入方式（最终采用 CDP，不改宿主任何文件）
+
+| 路线 | 结果 |
+|---|---|
+| 解包 `resources/app` | 应用启动即退出（换 pristine LS/asar 同样），已回滚 |
+| `NODE_OPTIONS=--require` | Electron 打包应用拒绝该选项（exit 9），已回滚 |
+| 重打包 `app.asar` | Electron 判为无效 → 退回 `default_app.asar`（截图里的 "To run a local app" 那页），**已回滚成原件** |
+| **CDP 注入（采用）** | 页面里 `Runtime.evaluate` 注入同一份 `pageMain`，宿主文件零改动 |
+
+```powershell
+aarmor hud shortcut     # 生成 build\Antigravity-CDP.lnk（带 --remote-debugging-port=9222）
+# 用它启动 Antigravity（或在桌面用同名快捷方式）
+aarmor hud attach       # 把齿轮注入当前 Hub 页面
+aarmor hud open         # = 起控制面 + attach
+```
+
+边界：重启应用后要重新 `attach`（或用 `hud open` 一条搞定）；宿主升级不影响这条路。
+
+

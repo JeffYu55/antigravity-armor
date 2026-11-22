@@ -836,15 +836,34 @@ async function hudCmd(sub) {
     const r = spawnSync(process.execPath, [join(cfg.projectRoot, 'scripts', name), ...extra], { stdio: 'inherit' })
     if (r.status !== 0) throw new Error(name + ' 退出码 ' + r.status)
   }
+  if (action === 'attach') {
+    const { attachAll } = await import('./hud/cdp.mjs')
+    if (!hudProcessAlive()) spawnControlPlane()
+    const token = ensureToken(cfg)
+    const port = Number(flags.port || 9222)
+    try {
+      const rows = await attachAll(cfg, token, { port })
+      if (!rows.length) console.log('没有可注入的 http(s) 页面：应用是否带 --remote-debugging-port 启动？')
+      for (const r of rows) console.log((r.ok ? 'ok   ' : 'fail ') + r.url + (r.ok ? '  -> ' + r.value : '  ' + r.error))
+    } catch (e) { console.log('attach 失败：' + e.message) }
+    return
+  }
+  if (action === 'shortcut') {
+    const lnk = join(cfg.projectRoot, 'build', 'Antigravity-CDP.lnk')
+    mkdirSync(dirname(lnk), { recursive: true })
+    const ps = `$w=New-Object -ComObject WScript.Shell; $s=$w.CreateShortcut('${lnk}'); $s.TargetPath='${join(cfg.antigravityRoot, 'Antigravity.exe')}'; $s.Arguments='--remote-debugging-port=${flags.port || 9222}'; $s.WorkingDirectory='${cfg.antigravityRoot}'; $s.Save()`
+    const r = spawnSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' })
+    if (r.status !== 0) { console.log('创建快捷方式失败：' + (r.stderr || '').slice(0, 200)); return }
+    console.log('已生成：' + lnk)
+    console.log('用它启动 Antigravity（带调试端口），然后 aarmor hud attach')
+    return
+  }
   if (action === 'embed') {
-    // 内嵌 UI：重打包 app.asar（解包目录与 NODE_OPTIONS 两条路在本机实测都起不来，见 docs/REFIT）
     if (!hudProcessAlive()) spawnControlPlane()
     ensureToken(cfg)
-    const out = join(cfg.projectRoot, 'build', 'app-armor.asar')
-    runScript('repack-asar.mjs', ['--inject-hud', `--out=${out}`])
-    console.log('产物: ' + out)
-    console.log('启用: node scripts/repack-asar.mjs --inject-hud --apply   （自动备份 resources/app.asar.armor-orig）')
-    console.log('回滚: copy resources\\app.asar.armor-orig resources\\app.asar')
+    console.log('内嵌 UI 路线：CDP 注入（不改宿主文件）')
+    console.log('  1) aarmor hud shortcut            生成带 --remote-debugging-port 的启动快捷方式')
+    console.log('  2) 用该快捷方式启动 Antigravity，再跑 aarmor hud attach')
     return
   }
   if (action === 'unembed') {
@@ -864,10 +883,17 @@ async function hudCmd(sub) {
   }
   if (action === 'open') {
     if (!hudProcessAlive()) spawnControlPlane()
-    ensureToken(cfg)
-    const appDir = join(cfg.antigravityRoot, 'resources', 'app')
-    if (!existsSync(appDir)) runScript('install-embedded-hud.mjs', ['--apply'])
-    console.log('内嵌 HUD 就绪：控制面 127.0.0.1:' + (cfg.hud.port || 50101) + '，界面在 Antigravity 窗口底部 dock')
+    const token = ensureToken(cfg)
+    const { attachAll } = await import('./hud/cdp.mjs')
+    try {
+      const rows = await attachAll(cfg, token, { port: Number(flags.port || 9222) })
+      if (!rows.length) {
+        console.log('控制面已起（127.0.0.1:' + (cfg.hud.port || 50101) + '），但没有可注入页面：')
+        console.log('  用 aarmor hud shortcut 生成的快捷方式启动 Antigravity（带 --remote-debugging-port），再跑本条')
+        return
+      }
+      for (const r of rows) console.log((r.ok ? 'ok   ' : 'fail ') + r.url)
+    } catch (e) { console.log('控制面已起；attach 失败：' + e.message + '（应用需带 --remote-debugging-port 启动）') }
     return
   }
   if (action === 'stop') {

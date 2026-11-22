@@ -75,7 +75,7 @@ function pageMain(cfg) {
   var base = cfg.base
   var token = cfg.token || ''
   var lane = 'neutral'
-  var open = false
+  var open = true
   var lastText = ''
 
   function el(tag, cls, text) {
@@ -122,6 +122,7 @@ function pageMain(cfg) {
     if (!document.body) return
     if (!document.getElementById('armor-dock')) document.body.appendChild(dock)
   }
+  if (open) dock.classList.add('ad-open')
   mount()
   new MutationObserver(function () { mount() }).observe(document.documentElement, { childList: true, subtree: true })
 

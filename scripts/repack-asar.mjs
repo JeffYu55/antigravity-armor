@@ -151,8 +151,8 @@ function main() {
   if (arg('apply')) {
     const bak = join(cfg.antigravityRoot, 'resources', 'app.asar.armor-orig')
     if (!existsSync(bak)) copyFileSync(cfg.asarPath, bak)
-    copyFileSync(join(cfg.projectRoot, 'build', 'self-test.asar'), cfg.asarPath) // 复用已写出的产物
-    log.ok('applied -> ' + cfg.asarPath + '  (orig backup: ' + bak + ')')
+    writeFileSync(cfg.asarPath, buf)
+    log.ok('applied -> ' + cfg.asarPath + '  (' + buf.length + 'B, 原件备份 ' + bak + ')')
     return
   }
   console.log('DRY：加 --self-test / --out=FILE / --apply')

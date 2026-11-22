@@ -107,6 +107,15 @@ export function createHudServer(cfg) {
   let probeRun = null
 
   const server = http.createServer(async (req, res) => {
+    // CORS：内嵌 dock 跑在 Antigravity 的页面里（origin 是 https://127.0.0.1:<port>），
+    // 访问 http://127.0.0.1:50101 属于跨源 + 自定义头，必须放行预检，否则 dock 永远显示离线。
+    // 安全性靠 token + 只绑 loopback，不靠同源策略。
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Headers', 'X-Armor-Token, Content-Type')
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    res.setHeader('Access-Control-Max-Age', '600')
+    if (req.method === 'OPTIONS') { res.writeHead(204); return res.end() }
+
     // 只认 loopback + token
     const remote = req.socket.remoteAddress || ''
     if (!(remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1')) return json(res, 403, { error: 'loopback only' })
