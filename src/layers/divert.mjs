@@ -530,8 +530,9 @@ export function createDivertServer(cfg, opts = {}) {
               if (uniq.length) say('MODELS ' + uniq.length + ': ' + uniq.slice(0, 20).join(', '))
               try {
                 mkdirSync(cfg.captureDir, { recursive: true })
-                writeFileSync(join(cfg.captureDir, 'models.json'), raw)
-                say('MODELS-DUMP ' + Buffer.byteLength(raw, 'utf8') + 'B -> ' + join(cfg.captureDir, 'models.json'))
+                const rawBuf = Buffer.concat(chunks)
+                writeFileSync(join(cfg.captureDir, 'models.bin'), rawBuf)
+                say('MODELS-DUMP ' + rawBuf.length + 'B -> ' + join(cfg.captureDir, 'models.bin'))
               } catch { /* 忽略 */ }
             } catch { /* 忽略 */ }
           })
