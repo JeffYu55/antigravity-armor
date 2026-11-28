@@ -44,7 +44,14 @@ export function saveOriginal(cfg, path, buf = null) {
   })() || { id, sha, size: data.length, at: new Date().toISOString(), paths: [] }
   if (!Array.isArray(meta.paths)) meta.paths = []
   if (!meta.paths.some((x) => norm(x) === norm(path))) meta.paths.push(path)
-  meta.lastSeenAt = new Date().toISOString()
+  // lastSeenAt 必须是**严格单调**的：同一毫秒内连写两份原件（升级前/升级后）时，
+  // 两个记录的 ISO 串完全相同，排序退化成文件系统顺序 —— 于是「最近的原件」
+  // 有时是新的、有时是旧的，回滚会把旧版本写回新安装（purge 用例偶发红就是这个）。
+  // 这里取「本路径所有记录的最大 seen + 1ms」与自己写入时刻的较大者。
+  const seenMax = listOriginals(cfg)
+    .filter((m) => Array.isArray(m.paths) && m.paths.some((x) => norm(x) === norm(path)))
+    .reduce((acc, m) => Math.max(acc, Date.parse(m.lastSeenAt || m.at || 0) || 0), 0)
+  meta.lastSeenAt = new Date(Math.max(Date.now(), seenMax + 1)).toISOString()
   writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n', 'utf8')
   return { id, bak, meta, saved, sha }
 }
@@ -62,7 +69,10 @@ export function listOriginals(cfg) {
       out.push({ ...meta, bak })
     } catch { /* 坏元数据跳过 */ }
   }
-  return out.sort((a, b) => String(b.lastSeenAt || b.at || '').localeCompare(String(a.lastSeenAt || a.at || '')))
+  return out.sort((a, b) => {
+    const cmp = String(b.lastSeenAt || b.at || '').localeCompare(String(a.lastSeenAt || a.at || ''))
+    return cmp !== 0 ? cmp : String(b.id || '').localeCompare(String(a.id || ''))
+  })
 }
 
 /** 某个路径最近一次记录的原件 */

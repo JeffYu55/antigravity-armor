@@ -1523,7 +1523,10 @@ export async function handleSameModel({ req, res, body, headers, cfg, armorText,
           }
         } catch { /* 忽略 */ }
       }
-      if (a >= Number(d.rewriteFrom || 2)) {
+      // 改写要额外发一次模型调用（小模型），所以必须是显式开启的能力：
+      // 只在配置了 d.rewriteModel 时才做。以前默认在任何升档都跑，
+      // 结果是「一次重试 = 两次上游调用」——测试按调用数断言全红，账单也翻倍。
+      if (a >= Number(d.rewriteFrom || 2) && d.rewriteModel) {
         // 第二档：先用小模型把请求改写成自然平实的中文，再过 soften 词表，然后原样发给目标模型。
         // 实测（hydrogen）：改写+soften 的句子 200 + 8,241 字完整实现；原句 358 字过滤器话术。
         try {

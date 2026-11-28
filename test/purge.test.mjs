@@ -3,6 +3,7 @@
 // 夹具是自造的小文件（假 exe = 26 字节的 block 锚点、假 asar = endpoint 串），
 // 不碰真机 155MB 二进制 —— 但走的是**同一套 install/verify 代码**，不是 mock。
 import assert from 'node:assert/strict'
+import { AARMOR_VERSION } from '../src/version.mjs'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -89,7 +90,9 @@ export async function testRevOfAndStampRoundtrip() {
   assert.match(revOf(cfg.binaryPath), /^[0-9a-f]{16}$/)
   assert.equal(readAppliedStamp(cfg), null)
   const stamp = markPatchesApplied(cfg, { revs: { binary: 'b1', ide: 'i1' }, layers: { armorHash: 'h' } })
-  assert.equal(stamp.armorVersion, '1.9.0')
+  // 版本号只该有一个来源：package.json（经 version.mjs）。写死在这里的话，
+  // 每次发版都要改测试，改漏了就是一条与功能无关的红灯。
+  assert.equal(stamp.armorVersion, AARMOR_VERSION)
   const back = readAppliedStamp(cfg)
   assert.equal(back.revs.binary, 'b1')
   assert.equal(stampMatches(back, { binary: 'b1', ide: 'i1' }), true)

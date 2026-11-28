@@ -6,15 +6,18 @@ import { execFileSync, spawnSync, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { loadConfig } from './config.mjs'
 import { readText, hasBom, expand, listBackups, writeText } from './util/fs.mjs'
-import { installBinary, verifyBinary, rollbackBinary } from './layers/binary.mjs'
+import { installBinary, verifyBinary, rollbackBinary, referenceBuffer } from './layers/binary.mjs'
 import { installRules, armorBody } from './layers/rules.mjs'
 import { scanRuleFiles, disarmAll } from './layers/rulescan.mjs'
 import { installHooks, buildHooksJson, discoverWorkspaces, hooksDrift } from './layers/hooks.mjs'
-import { installIde, rollbackIde, buildReplacement } from './layers/ide.mjs'
+import { installIde, rollbackIde, buildReplacement, detectAnchor, candidateAnchors } from './layers/ide.mjs'
+import { ensureHostTable, anchorStats, deriveTable } from './layers/refit.mjs'
+import { hostSummary, signatureState, findLanguageServer } from './host.mjs'
+import { originalFor } from './purge/hostbackups.mjs'
 import { ensureArmor, purgeSummary, stampIfAligned } from './purge/reapply.mjs'
 import { uninstallArmor } from './purge/uninstall.mjs'
 import { armorStatus, armorEdit, armorReset } from './purge/override.mjs'
-import { resolveKey } from './credentials.mjs'
+import { resolveKey, redirectBlocked } from './credentials.mjs'
 import { log } from './log.mjs'
 import { upstreamWarning, scanUpstream } from './diag/upstream.mjs'
 import { probeLanguageServers } from './diag/ls.mjs'
@@ -43,14 +46,31 @@ function netstat(port) {
 
 async function status() {
   const rows = []
+  // 宿主：平台 / 版本 / 根目录 —— 适配所有版本的第一眼就在这里（旧版写死 Windows 路径，换机即瞎）
+  const hs = hostSummary(cfg)
+  rows.push(['host', hs.version + ' · ' + hs.platform + '/' + hs.arch, hs.root || '(未探测到)'])
   // 二进制
   const b = existsSync(cfg.binaryPath) ? verifyBinary(cfg) : null
-  rows.push(['binary', b ? (b.armored ? (b.clean ? 'ARMORED' : 'ARMORED (残留锚点 ' + b.remaining.length + ')') : 'not armored') : 'MISSING', cfg.binaryPath])
+  let anchorCell = ''
+  if (existsSync(cfg.binaryPath || '')) {
+    try {
+      const buf = readFileSync(cfg.binaryPath)
+      // 已装甲的 live 里锚点已经被换掉了，统计必须对着**原件**做，
+      // 否则 status 会显示「44% 命中」，看起来像补丁崩了（实际是全打上了）。
+      const ref = referenceBuffer(cfg, buf, buf.includes(Buffer.from(cfg.binary.marker, 'utf8')))
+      const st = anchorStats(ref, (() => { try { return JSON.parse(readFileSync(cfg.patchesFile, 'utf8')) } catch { return {} } })())
+      anchorCell = ' 锚点 ' + st.hit + '/' + st.total + ' (' + Math.round(st.ratio * 100) + '%)'
+    } catch { /* 统计失败不影响总览 */ }
+  }
+  const sig = existsSync(cfg.binaryPath || '') ? signatureState(cfg.binaryPath) : null
+  rows.push(['binary', (b ? (b.armored ? (b.clean ? 'ARMORED' : 'ARMORED (残留锚点 ' + b.remaining.length + ')') : 'not armored') : 'MISSING') + anchorCell + (sig && sig.signed ? ' · signed' : ''), cfg.binaryPath || '(未找到 language_server)'])
   // IDE
   let ideState = 'MISSING'
   if (existsSync(cfg.asarPath)) {
     const buf = readFileSync(cfg.asarPath)
-    ideState = buf.includes(Buffer.from(buildReplacement(cfg), 'utf8')) ? 'PATCHED -> localhost' : (buf.includes(Buffer.from(cfg.ide.endpointFind, 'utf8')) ? 'original (points at Google)' : 'unknown')
+    const d = detectAnchor(cfg, buf)
+    ideState = d.done > 0 && d.hits === 0 ? 'PATCHED -> localhost'
+      : (d.hits > 0 ? 'original (points at Google)' : 'anchor missing (' + JSON.stringify(candidateAnchors(cfg)[0]) + ')')
   }
   rows.push(['ide', ideState, cfg.asarPath])
   const idePatched = ideState === 'PATCHED -> localhost'
@@ -103,10 +123,12 @@ async function status() {
     try { process.kill(Number(pid), 0); lsState = 'ours pid=' + pid } catch { lsState = 'stale pid file' }
   }
   let lsProbe = { count: 0, viaDivert: 0, entries: [], summary: '未探到' }
-  try { lsProbe = probeLanguageServers(Number(cfg.divert.port)) } catch {}
+  try { lsProbe = probeLanguageServers(Number(cfg.divert.port), { idePatched: idePatched && !redirectBlocked(cfg) }) } catch {}
   const lsCell = lsProbe.count ? lsProbe.summary : lsState
-  rows.push(['ls', lsCell, lsProbe.count ? 'language_server.exe（真实进程）' : join(cfg.logDir, 'language_server.log')])
-  if (idePatched && lsProbe.count && lsProbe.viaDivert === 0) {
+  rows.push(['ls', lsCell, lsProbe.count ? 'language_server（真实进程）' : join(cfg.logDir, 'language_server.log')])
+  // 只有「改道本该生效」时才提示 LS 没走 divert；没配 key 时 ide 层是故意跳过的，
+  // 这时候再报警只会制造噪音（现场：status 天天红，人就开始无视红行）。
+  if (idePatched && !redirectBlocked(cfg) && lsProbe.count && lsProbe.viaDivert === 0) {
     rows.push(['⚠ ls↔divert', '未发现指向 divert 的 LS', 'L4 补丁可能已被 IDE 更新覆盖，跑 install --layer=ide']) 
   }
   // 语言服务器直连出站（v1.8.4）：L1–L5 只覆盖 `v1internal:*` 那条被改道的通道，
@@ -218,7 +240,16 @@ async function install() {
   if (layer === 'all' || layer === 'rules') res.rules = installRules(cfg, { apply, workspaces: ws || discoverWorkspaces(cfg) })
   if (layer === 'all' || layer === 'hooks') res.hooks = installHooks(cfg, { apply, workspaces: ws })
   if (layer === 'all' || layer === 'binary') { log.step('binary (41 injection points)'); res.binary = installBinary(cfg, { apply }) }
-  if (layer === 'all' || layer === 'ide') { log.step('ide endpoint'); res.ide = installIde(cfg, { apply }) }
+  if (layer === 'all' || layer === 'ide') {
+    const why = redirectBlocked(cfg)
+    if (why) {
+      log.warn('ide endpoint 跳过：未解析到 ' + cfg.divert.keyRef + '（改道后没有 key 会让聊天 503）')
+      res.ide = { skipped: why }
+    } else {
+      log.step('ide endpoint')
+      res.ide = installIde(cfg, { apply })
+    }
+  }
   if (!apply) { log.warn('dry run — 加 --apply 才写入'); return res }
   // v1.9.0：落盘后打 purge 戳（与 ensure 同一套判据）。未对齐就不写假戳。
   try {
@@ -631,6 +662,46 @@ async function ensureCmd() {
   if (!r.ok) process.exitCode = 1
 }
 
+/** aarmor refit —— 对当前宿主现场派生补丁表（任意版本通用）
+ *
+ * 何时用：Antigravity 升级后 status 显示「锚点命中率过低 / anchor-miss」。
+ * 干什么：拿原件（未装甲时就是 live）把上一版表的每条锚点重新定位一遍，
+ *         命中的按当行活文本重算等长替换，miss 的列出来，结果落到
+ *         patches/hosts/<版本>/binary-patches.json —— 可审阅、可提交、可回滚。
+ */
+async function refitCmd() {
+  if (!cfg.binaryPath || !existsSync(cfg.binaryPath)) {
+    log.warn('未找到 language_server：' + (cfg.antigravityRoot || '(宿主未探测到)'))
+    log.info('提示：AARMOR_HOST_ROOT=/path/to/Antigravity.app/Contents 可显式指定')
+    process.exitCode = 1
+    return
+  }
+  const live = readFileSync(cfg.binaryPath)
+  const armored = live.includes(Buffer.from(cfg.binary.marker, 'utf8'))
+  let ref = live
+  if (armored) {
+    try {
+      const o = originalFor(cfg, cfg.binaryPath)
+      if (o && existsSync(o.bak)) { ref = readFileSync(o.bak); log.info('refit: live 已装甲，改用原件派生') }
+    } catch { /* 忽略 */ }
+  }
+  const r = ensureHostTable(cfg, ref, { force: true })
+  const st = r.stats
+  console.log('\nrefit · ' + cfg.hostVersion + ' · ' + process.platform + '/' + process.arch)
+  console.log('  宿主      ' + cfg.antigravityRoot)
+  console.log('  二进制    ' + cfg.binaryPath + '  (' + ref.length + ' B' + (armored ? '，原件' : '') + ')')
+  console.log('  补丁表    ' + r.file)
+  console.log('  锚点命中  ' + st.hit + '/' + st.total + ' (' + Math.round(st.ratio * 100) + '%)'
+    + '  block=' + st.block + ' 句=' + st.sentences.hit + '/' + st.sentences.total
+    + ' 固定串=' + st.fixed.hit + '/' + st.fixed.total + ' 行=' + st.lines.hit + '/' + st.lines.total)
+  console.log('  派生      精确 ' + r.table.refit.exact + ' · 重定位 ' + r.table.refit.relocated + ' · 批准填充 ' + r.table.refit.filler + ' · miss ' + r.table.missing.length)
+  if (r.table.missing.length) {
+    console.log('\n  miss（这些锚点在当前宿主里已不存在，需要按新护栏重写）:')
+    for (const m of r.table.missing.slice(0, 20)) console.log('    - [' + m.kind + '] ' + (m.probe || m.reason || '').slice(0, 110))
+  }
+  console.log('\n下一步：aarmor install --apply --layer=binary   （或 aarmor ensure --apply）')
+}
+
 /** aarmor uninstall —— 全量还原（移植 dsh-purge lib/uninstall.js）。默认 dry-run。 */
 async function uninstallCmd() {
   const apply = !!flags.apply
@@ -990,7 +1061,7 @@ async function hudCmd(sub) {
   throw new Error('未知 hud 子命令 ' + action + '（start/open/stop/status/token/lane）')
 }
 
-const commands = { status, verify, install, divert, ls, drive, rollback, ensure: ensureCmd, uninstall: uninstallCmd, armor: armorCmd, netcheck: netcheckCmd, lsnet: lsnetCmd, eval: evalCmd, probe: probeCmd, seats: seatsCmd, rules: rulesCmd, journal: journalCmd, hud: hudCmd }
+const commands = { status, verify, install, divert, ls, drive, rollback, refit: refitCmd, ensure: ensureCmd, uninstall: uninstallCmd, armor: armorCmd, netcheck: netcheckCmd, lsnet: lsnetCmd, eval: evalCmd, probe: probeCmd, seats: seatsCmd, rules: rulesCmd, journal: journalCmd, hud: hudCmd }
 const SUBCOMMANDS = new Set(['divert', 'ls', 'drive', 'eval', 'probe', 'seats', 'rules', 'armor', 'hud'])
 const handler = commands[cmd]
 if (!handler) {
@@ -1002,6 +1073,7 @@ if (!handler) {
                                        幂等自愈：刷新过期备份 → 还原原件 → 重打 → 复核 → 打戳
                                        （Antigravity 升级后跑这一条即可；autostart 会每 5 分钟顺带跑）
   aarmor uninstall [--apply]          全量还原：binary/asar/rules/hooks/席位词包/清戳
+  aarmor refit                        对当前宿主现场派生补丁表（任意版本通用；升级后先跑这条）
   aarmor verify [--json]              审计锚点/注册表/purge 戳
   aarmor rollback --layer=binary|ide|rules|hooks
   aarmor armor status|edit|reset      提示词覆盖位（用户副本优先于 assets/armor.md 种子）

@@ -8,6 +8,7 @@ import https from 'node:https'
 import { URL } from 'node:url'
 import { createWriteStream, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { geminiToOpenAI, geminiEvent, createStreamAccumulator } from '../proto/convert.mjs'
 import { resolveKey } from '../credentials.mjs'
 import { log } from '../log.mjs'
@@ -53,13 +54,19 @@ export function jitteredTemperature(base, attemptNo, step = 0.15) {
 }
 
 export function createDivertServer(cfg, opts = {}) {
+  // 目录兜底（v1.10.0）：调用方（探针跑分器、单测、外部嵌入）经常只传 divert 段，
+  // 以前这里直接 join(cfg.stateDir, ...) → `path` undefined 抛错，整套 measure 全红。
+  // 目录只用来放探针缓存/抓包，缺了不该让服务起不来。
+  const stateDir = cfg.stateDir || cfg.logDir || join(tmpdir(), 'aarmor-state')
+  const logDir = cfg.logDir || stateDir
+  const captureDir = cfg.captureDir || join(stateDir, 'capture')
   // 探针用：只把最近一次真实请求的 Authorization 留在内存里，供 /armor/probe 复放
   // （不落盘、不打印；进程一停就没了）
   let lastAuth = null
   let lastReqBody = null
   let lastHeaders = null
   // 探针会话缓存：重启后仍能继续探（只在本机 state 目录，含你自己的 OAuth 头）
-  const probeSessionPath = join(cfg.stateDir, 'probe', 'session.json')
+  const probeSessionPath = join(stateDir, 'probe', 'session.json')
   try {
     if (existsSync(probeSessionPath)) {
       const s = JSON.parse(readFileSync(probeSessionPath, 'utf8'))
@@ -70,7 +77,7 @@ export function createDivertServer(cfg, opts = {}) {
   } catch { /* 忽略 */ }
   const saveProbeSession = () => {
     try {
-      mkdirSync(join(cfg.stateDir, 'probe'), { recursive: true })
+      mkdirSync(join(stateDir, 'probe'), { recursive: true })
       writeFileSync(probeSessionPath, JSON.stringify({ auth: lastAuth, body: lastReqBody, headers: lastHeaders, at: Date.now() }))
     } catch { /* 忽略 */ }
   }
@@ -105,7 +112,7 @@ export function createDivertServer(cfg, opts = {}) {
   // 每次重试把温度抬高一档，给重试一个真正不同的样本，而不是同分布再抽一次。
   const jitterOn = opts.jitter !== undefined ? opts.jitter : (cfg.divert.jitter ?? true)
   const jitterStep = opts.jitterStep !== undefined ? opts.jitterStep : (cfg.divert.jitterStep ?? 0.15)
-  mkdirSync(cfg.logDir, { recursive: true })
+  mkdirSync(logDir, { recursive: true })
   const out = opts.logFile ? createWriteStream(opts.logFile, { flags: 'a' }) : null
   const say = (...a) => { const line = new Date().toISOString().slice(11, 19) + ' ' + a.join(' '); log.debug(line); out?.write(line + '\n') }
   // 常驻代理必须活着：任何未捕获异常只记日志，不退出（v1.6.4）
@@ -538,10 +545,10 @@ export function createDivertServer(cfg, opts = {}) {
               const uniq = [...new Set(names)]
               if (uniq.length) say('MODELS ' + uniq.length + ': ' + uniq.slice(0, 20).join(', '))
               try {
-                mkdirSync(cfg.captureDir, { recursive: true })
+                mkdirSync(captureDir, { recursive: true })
                 const rawBuf = Buffer.concat(chunks)
-                writeFileSync(join(cfg.captureDir, 'models.bin'), rawBuf)
-                say('MODELS-DUMP ' + rawBuf.length + 'B -> ' + join(cfg.captureDir, 'models.bin'))
+                writeFileSync(join(captureDir, 'models.bin'), rawBuf)
+                say('MODELS-DUMP ' + rawBuf.length + 'B -> ' + join(captureDir, 'models.bin'))
               } catch { /* 忽略 */ }
             } catch { /* 忽略 */ }
           })

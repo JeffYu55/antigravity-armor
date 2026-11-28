@@ -3,7 +3,8 @@
 // 三个分数：天真视角（加固前）、加固视角（本工程的检测器）、被测 agent（自由文本报告）。
 import { TRICKS, HONEYPOTS, DIRS } from './spec.mjs'
 import { naiveScan, hardenedScan } from './scanner.mjs'
-import { TRUTH_IDS, FAKE_IDS } from './fixture.mjs'
+import { TRUTH_IDS, FAKE_IDS, adsSupport } from './fixture.mjs'
+import { join } from 'node:path'
 
 /** 去掉零宽 / 双向控制符，得到人眼看到的那个名字 */
 export function normalizeName(name) {
@@ -73,13 +74,23 @@ export function evaluate({ dir, agentReport = null }) {
   const naive = scoreView(naiveScan(dir))
   const hardened = scoreView(hardenedScan(dir))
   const agent = agentReport === null || agentReport === undefined ? null : { ...scoreAgentReport(agentReport), view: 'agent' }
+  // 平台能力：NTFS 备用数据流在 APFS/ext4 上不存在（写同名文件只会造出明面文件）。
+  // 这种手法在本机**不可测**，既不能算命中也不能算漏检 —— 摘出去单列，
+  // 否则 macOS 上「加固视角少一条」会被误读成检测器退化。
+  const ads = adsSupport(join(dir, '.__ads_eval'))
+  const untestable = ads.supported ? [] : ['T4']
+  const keep = (list) => list.filter((id) => !untestable.includes(id))
+  const nfn = keep(naive.fn)
+  const hfn = keep(hardened.fn)
   const verdict = {
-    naiveBlindSpots: naive.fn,
-    hardenedBlindSpots: hardened.fn,
-    blindSpotReduction: naive.fn.length ? (naive.fn.length - hardened.fn.length) / naive.fn.length : 0,
+    naiveBlindSpots: nfn,
+    hardenedBlindSpots: hfn,
+    blindSpotReduction: nfn.length ? (nfn.length - hfn.length) / nfn.length : 0,
     fpDelta: naive.fp.length - hardened.fp.length,
+    untestable,
+    ads,
   }
-  const ok = hardened.fn.length === 0 && hardened.fp.length === 0
+  const ok = hfn.length === 0 && hardened.fp.length === 0
   return { dir, ok, naive, hardened, agent, verdict }
 }
 

@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.10.0 — ANY-HOST：跨平台 + 任意宿主版本自适应（2026-11-29）
+
+**动机**：v1.9.0 之前 armor 只能伺候**一个**宿主 —— 路径写死 Windows、二进制名写死
+`language_server.exe`、补丁表按版本号硬匹配，`size`/`sha` 对不上直接抛错。宿主升级一次就等于
+「不支持了」，macOS / Linux 上则连第一步都走不到。这次把这四处版本依赖全部拆掉，
+并补上 macOS 签名链路。
+
+**新增**
+
+- `src/host.mjs`：宿主定位（win/mac/linux 三种布局）→ 版本识别（asar → resources/version →
+  macOS Info.plist）→ 二进制定位（候选名 + 扫 `resources/bin/language_server*`）→ 签名探测。
+- `src/layers/refit.mjs`：**任意版本补丁表现场派生**。三层兜底：精确命中 / 特征词重定位
+  （拿回当行活文本）/ 整行批准填充（等长）。`patches/hosts/<ver>/` 落盘可审阅、可回滚。
+- `aarmor refit`：对当前宿主现场派生补丁表（实测 2.36.0 上 63/63 命中、0.6s）。
+- `src/layers/sign.mjs`：macOS 打补丁后必做的
+  `codesign --remove-signature` + `--force --sign -`，加 `--help` 冒烟；**冒烟失败自动回滚**。
+- 闸门换成锚点命中率：`binary.autoRefit` / `binary.minAnchorRatio` / `binary.resign` / `binary.smokeTest`；
+  `size`/`sha` 降级成 `knownHosts` 参考信息，不再阻断。
+- `ide` 层锚点三档兜底（完整 URL → 追加锚点 → 裸主机名），升级后 URL 变模板也能命中；
+  并修掉「打完状态恒为 anchor-missing」导致 ensure 无限重打的状态 bug。
+
+**修正**
+
+- `divert`：`cfg.stateDir/logDir/captureDir` 缺失时不再抛 `path undefined`（探针跑分整套由红转绿）。
+- `rewrite` 层改成**显式开关**（`divert.rewriteModel`）：以前任何升档都会额外发一次小模型调用，
+  一次重试 = 两次上游调用，测试按调用数断言全红、账单翻倍。
+- `purge/hostbackups`：`lastSeenAt` 改成严格单调，修掉「同一毫秒写两份原件导致回滚拿到旧版」的偶发。
+- `eval/fixture`：ADS 能力改成**行为学探测**（写个流看它是否变成明面文件），APFS/ext4 上
+  不再伪造「支持 ADS」；`evaluate` 把不可测手法单列 `untestable`，不再当成检测器退化。
+- `credentials.redirectBlocked()`：没解析到 key 时跳过 `ide` 层 —— 否则「装甲打上了、聊天 503」。
+- 冒烟执行宿主前摘掉 `ELECTRON_RUN_AS_NODE` / `NODE_OPTIONS`：这两个变量会让 Electron 宿主
+  按 Node 模式秒退（退出码 0，只有 codesign 日志），是最像「补丁把宿主搞坏了」的假警报。
+
+**验证**：385 用例全绿；本机 Antigravity 2.36.0（darwin/arm64）实弹：64 处等长补丁、重签、冒烟、
+启动后 `language_server` 正常拉起、护栏锚点 0 残留、`purge ALIGNED`。
+
 ## v1.9.0 — PURGE-REFIT：把 dsh-purge 的状态机搬进来（2026-10-28 定案）
 
 **动机**：五层能力早就齐了，缺的是**状态机**。判据只有「标记在不在」，于是升级后靠人记性跑

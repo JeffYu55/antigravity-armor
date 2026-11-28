@@ -20,6 +20,35 @@ export const FAKE_IDS = HONEYPOTS.map((h) => h.id)
 
 function stripBom(buf) { return buf.subarray(0, 3).equals(BOM) ? buf.subarray(3) : buf }
 
+/**
+ * 备用数据流（ADS）能力探测。
+ *
+ * 为什么不能只看 process.platform（2026-11 现场，macOS 14 / APFS）：
+ * 非 Windows 上 `writeFileSync('notes.txt:creds')` 会**成功**，但它建的是一个
+ * 名字里带冒号的普通文件（macOS 的 POSIX 层允许 ':'，Finder 显示成 '/'）。
+ * 于是「落盘成功 → 以为自己支持 ADS」，实际是把隐匿通道变成了明面文件：
+ * 自检 adsPresent=false、逐字节比对多出一条 missing-in-a，一整套评测结论作废。
+ * 所以判据是行为学的：写一个流，看它会不会作为目录项出现。会出现 = 假 ADS。
+ */
+export function adsSupport(dir) {
+  try {
+    mkdirSync(dir, { recursive: true })
+    const base = join(dir, '.__ads_probe')
+    writeFileSync(base, 'x')
+    const streamPath = base + ':probe'
+    writeFileSync(streamPath, 'y')
+    const appeared = readdirSync(dir).some((n) => n.includes(':probe'))
+    let back = null
+    try { back = readFileSync(streamPath, 'utf8') } catch { back = null }
+    try { rmSync(streamPath, { force: true }) } catch {}
+    try { rmSync(base, { force: true }) } catch {}
+    if (appeared) return { supported: false, reason: 'colon-filename-not-a-stream' }
+    return { supported: back === 'y', reason: back === 'y' ? null : 'roundtrip-mismatch' }
+  } catch (e) {
+    return { supported: false, reason: String(e && e.message || e) }
+  }
+}
+
 function put(dir, name, text, { bom = false } = {}) {
   mkdirSync(dir, { recursive: true })
   const p = join(dir, name)
@@ -35,17 +64,22 @@ export function materialize(dir) {
   const truth = join(dir, DIRS.truth)
   const written = []
   const unsupported = []
+  const ads = adsSupport(naive)
 
   for (const f of FILLERS) written.push({ id: null, kind: 'filler', path: put(naive, f.name, f.body, f) })
 
   for (const t of TRICKS) {
     const p = put(naive, t.name, t.body, t)
     if (t.ads) {
-      try {
-        const adsBytes = Buffer.from(t.ads.body, 'utf8')
-        writeFileSync(p + ':' + t.ads.stream, t.ads.bom ? Buffer.concat([BOM, adsBytes]) : adsBytes)
-        readFileSync(p + ':' + t.ads.stream) // 立刻回读，确认这个文件系统真的支持 ADS
-      } catch (e) { unsupported.push({ id: t.id, what: 'ads', error: String(e && e.message || e) }) }
+      if (!ads.supported) {
+        unsupported.push({ id: t.id, what: 'ads', error: ads.reason || 'unsupported-filesystem' })
+      } else {
+        try {
+          const adsBytes = Buffer.from(t.ads.body, 'utf8')
+          writeFileSync(p + ':' + t.ads.stream, t.ads.bom ? Buffer.concat([BOM, adsBytes]) : adsBytes)
+          readFileSync(p + ':' + t.ads.stream) // 立刻回读，确认这个文件系统真的支持 ADS
+        } catch (e) { unsupported.push({ id: t.id, what: 'ads', error: String(e && e.message || e) }) }
+      }
     }
     if (t.mtime) {
       const d = new Date(Date.parse(t.mtime))
@@ -60,7 +94,7 @@ export function materialize(dir) {
   written.push({ id: null, kind: 'overview', path: put(dir, 'GROUND_TRUTH.md', overviewMd, {}) })
   written.push({ id: null, kind: 'manifest', path: put(dir, 'manifest.json', JSON.stringify(manifest(), null, 2) + '\n', {}) })
 
-  return { dir, version: SPEC_VERSION, written, unsupported }
+  return { dir, version: SPEC_VERSION, written, unsupported, advertisements: ads }
 }
 
 /** 机器可读清单：谁是真迹、谁是诱饵、各自靠什么信号判定 */
@@ -93,6 +127,7 @@ export function verify(dir) {
   const naive = join(dir, DIRS.naive)
   const honey = join(dir, DIRS.honeypot)
   const streams = enumerateStreams(naive)
+  const ads = adsSupport(join(dir, '.__ads_verify'))
   const items = []
 
   for (const t of TRICKS) {
@@ -105,13 +140,20 @@ export function verify(dir) {
       checks.signal = declaredSignalPresent(t, stripBom(raw).toString('utf8'))
       try { checks.mtime = t.mtime ? Math.abs(statSync(p).mtimeMs - Date.parse(t.mtime)) < 1000 : true } catch { checks.mtime = false }
       if (t.ads) {
-        const list = streams.get(t.name) || []
-        checks.adsPresent = list.includes(t.ads.stream)
-        const content = checks.adsPresent ? readStream(p, t.ads.stream) : null
-        checks.adsBody = content !== null && String(content).replace(/^\uFEFF/, '').trim() === t.ads.body.trim()
+        if (!ads.supported) {
+          // 文件系统不支持真实流：这一项记为 N/A（null），不能算失败，也不能算通过
+          checks.adsPresent = null
+          checks.adsBody = null
+        } else {
+          const list = streams.get(t.name) || []
+          checks.adsPresent = list.includes(t.ads.stream)
+          const content = checks.adsPresent ? readStream(p, t.ads.stream) : null
+          checks.adsBody = content !== null && String(content).replace(/^\uFEFF/, '').trim() === t.ads.body.trim()
+        }
       }
     }
-    items.push({ id: t.id, tactic: t.tactic, kind: 'trick', ok: Object.values(checks).every(Boolean), checks })
+    const judged = Object.values(checks).filter((v) => v !== null)
+    items.push({ id: t.id, tactic: t.tactic, kind: 'trick', ok: judged.every(Boolean), checks })
   }
 
   for (const h of HONEYPOTS) {
@@ -126,7 +168,7 @@ export function verify(dir) {
     items.push({ id: h.id, kind: 'honeypot', ok: Object.values(checks).every(Boolean), checks })
   }
 
-  return { dir, ok: items.every((i) => i.ok), items }
+  return { dir, ok: items.every((i) => i.ok), items, ads }
 }
 
 function listFiles(root) {
