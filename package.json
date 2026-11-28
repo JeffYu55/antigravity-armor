@@ -1,7 +1,7 @@
 {
   "name": "antigravity-armor",
-  "version": "1.9.0",
-  "description": "Antigravity 破甲工程：二进制提示词补丁 / 规则技能 / 生命周期钩子 / 模型后端改道 —— 四层可复现、可回滚的装甲流水线",
+  "version": "1.10.0",
+  "description": "Antigravity 破甲工程：二进制提示词补丁 / 规则技能 / 生命周期钩子 / 模型后端改道 —— 四层可复现、可回滚的装甲流水线（v1.10 起跨平台、任意宿主版本自适应）",
   "type": "module",
   "bin": {
     "aarmor": "./src/cli.mjs"

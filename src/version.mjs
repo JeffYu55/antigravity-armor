@@ -2,7 +2,7 @@
 // 读不到时回落常量 —— 单测在临时目录跑也不会因此炸。
 import { readFileSync } from 'node:fs'
 
-let v = '1.9.0'
+let v = '1.10.0'
 try {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   if (pkg && pkg.version) v = String(pkg.version)

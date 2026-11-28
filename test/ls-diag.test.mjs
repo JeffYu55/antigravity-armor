@@ -34,6 +34,9 @@ export function testUnpaddedEndpointIsFlaggedLoudly() {
   assert.equal(r.count, 1)
   assert.equal(r.viaDivert, 0)
   assert.match(r.summary, /未指向 divert/)
+  // 未启用 L4 改道时，直连官方是预期行为，不误报「被覆盖」
+  const skipped = summarizeLs([official], 50100, { idePatched: false })
+  assert.match(skipped.summary, /L4 未启用/)
 }
 
 export function testNoProcessIsReportedAsDownNotAsHealthy() {

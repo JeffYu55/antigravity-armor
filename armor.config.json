@@ -1,24 +1,42 @@
 {
   "paths": {
-    "antigravityRoot": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\antigravity",
-    "geminiHome": "C:\\Users\\Administrator\\.gemini",
-    "dshHome": "C:\\Users\\Administrator\\.dsh",
+    "antigravityRoot": "auto",
+    "geminiHome": "~/.gemini",
+    "dshHome": "~/.dsh",
     "convRoots": [
       "~/.gemini/antigravity/conversations",
       "~/.gemini/antigravity-ide/conversations"
     ]
   },
   "binary": {
-    "relative": "resources/bin/language_server.exe",
+    "relative": "resources/bin/language_server",
     "maxLine": 1400,
     "marker": "**[ARMOR v3]",
-    "expectedSize": 207245312,
-    "expectedSha256": "CC94D648C39A67C293D0FDC8BEFC51E953D1A8F55617BF49FFF69885BA475DB9"
+    "autoRefit": true,
+    "minAnchorRatio": 0.34,
+    "resign": "auto",
+    "smokeTest": true,
+    "knownHosts": {
+      "2.34.0": {
+        "platform": "win32",
+        "size": 207245312,
+        "sha256": "CC94D648C39A67C293D0FDC8BEFC51E953D1A8F55617BF49FFF69885BA475DB9"
+      },
+      "2.35.1": {
+        "platform": "darwin",
+        "size": 197343440,
+        "note": "arm64 · Developer ID + hardened runtime —— 打完必须 ad-hoc 重签（layers/sign.mjs）"
+      }
+    },
+    "note": "knownHosts 只做参考信息；能不能打由锚点命中率判定（minAnchorRatio），命中不够自动 refit"
   },
   "ide": {
     "relative": "resources/app.asar",
     "endpointFind": "https://daily-cloudcode-pa.googleapis.com",
-    "endpointBase": "http://127.0.0.1:50100"
+    "endpointBase": "http://127.0.0.1:50100",
+    "anchors": [
+      "daily-cloudcode-pa.googleapis.com"
+    ]
   },
   "divert": {
     "port": 50100,
@@ -36,7 +54,7 @@
     "prefillFrom": 2,
     "jitter": true,
     "jitterStep": 0.15,
-    "maxAttempts": 2,
+    "maxAttempts": 8,
     "narrowKeepTurns": 2,
     "narrowToolChars": 600,
     "narrowMaxContents": 40,
@@ -57,6 +75,7 @@
     "templateFrom": 2,
     "escalateModel": "gemini-3.8-flash-high",
     "rewriteFrom": 2,
+    "rewriteModel": "gemini-3.5-flash-lite",
     "escalateFirst": false,
     "dropHistoryFrom": 1,
     "escalateModels": [

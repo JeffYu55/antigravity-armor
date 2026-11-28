@@ -9,6 +9,7 @@
 import { createHash } from 'node:crypto'
 import { patchStatusBinary, installBinary } from '../layers/binary.mjs'
 import { patchStatusIde, installIde, buildReplacement } from '../layers/ide.mjs'
+import { redirectBlocked } from '../credentials.mjs'
 import { patchStatusRules, installRules, armorBody } from '../layers/rules.mjs'
 import { patchStatusHooks, installHooks, discoverWorkspaces } from '../layers/hooks.mjs'
 import { refreshStaleOriginal, restoreOriginal } from './hostbackups.mjs'
@@ -34,7 +35,13 @@ export function purgeSummary(cfg, { workspaces = null } = {}) {
   const bodyHash = sha16(armorBody(cfg))
   const statuses = {
     binary: patchStatusBinary(cfg),
-    ide: patchStatusIde(cfg),
+    ide: (() => {
+      const st = patchStatusIde(cfg)
+      // 缺 key 时改道层是**故意跳过**的，不是 pending：否则 ensure 会永远判「未对齐」，
+      // 每 5 分钟重打一次，还会在某次把聊天打 503。
+      const why = redirectBlocked(cfg)
+      return why ? { ...st, skipped: why, pending: 0, blocked: null, patched: st.patched } : st
+    })(),
     rules: patchStatusRules(cfg, { workspaces: ws }),
     hooks: patchStatusHooks(cfg, { workspaces: ws }),
   }
@@ -60,6 +67,7 @@ export function purgeSummary(cfg, { workspaces = null } = {}) {
 function layerDirty(pre, layer) {
   const st = pre.statuses[layer]
   if (!st) return false
+  if (st.skipped) return false
   if (st.blocked) return false
   if ((st.pending || 0) > 0) return true
   if (layer === 'binary' || layer === 'ide') {

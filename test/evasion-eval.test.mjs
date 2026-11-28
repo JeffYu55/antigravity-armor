@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { rmSync, writeFileSync, readFileSync, existsSync, utimesSync } from 'node:fs'
-import { materialize, verify, compareDirs, clean } from '../src/eval/fixture.mjs'
+import { materialize, verify, compareDirs, clean, adsSupport } from '../src/eval/fixture.mjs'
 import { naiveScan, hardenedScan } from '../src/eval/scanner.mjs'
 import { evaluate, scoreAgentReport, normalizeName } from '../src/eval/harness.mjs'
 import { TRICKS, HONEYPOTS, DIRS } from '../src/eval/spec.mjs'
@@ -24,6 +24,10 @@ const ROOT = join(here, '..')
 const LEGACY = join(ROOT, 'test', 'fixtures', 'evasion-eval')
 const SANDBOX = join(ROOT, 'state', 'eval', 'test-fixture')
 const STRIPPED = join(ROOT, 'state', 'eval', 'test-stripped')
+
+// 本机文件系统是否支持 NTFS 备用数据流（ADS）。APFS / ext4 上「notes.txt:creds」
+// 只会造出一个名字带冒号的明面文件，所以 T4 这条手法在本机不可测 —— 相关断言按能力分成两支。
+const ADS = adsSupport(SANDBOX).supported
 
 let cached = null
 function fixture() {
@@ -58,10 +62,15 @@ export function testSpecReproducesLegacyFixtureByteForByte() {
   //    （testMaterializedFixtureSelfCheck 会断言 adsPresent + adsBody；这里再点名一次，
   //      保证即使哪天那条用例被改，ADS 覆盖也不会静默消失）
   const v = verify(fixture())
-  const ads = v.items.find((i) => i.id && String(i.id).includes('ads')) || v.items.find((i) => i.checks && 'adsPresent' in i.checks)
-  assert.ok(ads, '重建沙箱里必须有带 ADS 的条目')
-  assert.equal(ads.checks.adsPresent, true, 'ADS 必须真的落盘：' + JSON.stringify(ads.checks))
-  assert.equal(ads.checks.adsBody, true, 'ADS 内容必须正确：' + JSON.stringify(ads.checks))
+  const adsItem = v.items.find((i) => i.id === 'T4')
+  assert.ok(adsItem, '重建沙箱里必须有 T4 条目')
+  if (ADS) {
+    assert.equal(adsItem.checks.adsPresent, true, 'ADS 必须真的落盘：' + JSON.stringify(adsItem.checks))
+    assert.equal(adsItem.checks.adsBody, true, 'ADS 内容必须正确：' + JSON.stringify(adsItem.checks))
+  } else {
+    assert.equal(adsItem.checks.adsPresent, null, '不支持 ADS 的文件系统上这一项必须是 N/A，不能假装通过')
+    assert.ok(v.ads && v.ads.supported === false, 'verify 必须报出平台 ADS 能力')
+  }
 }
 
 export function testMaterializedFixtureSelfCheck() {
@@ -80,7 +89,9 @@ export function testNaiveViewLeavesTwoBlindSpots() {
 
 export function testHardenedViewClosesBothBlindSpots() {
   const h = hardenedScan(fixture())
-  assert.deepEqual([...h.hits].sort(), ['T1', 'T2', 'T3', 'T4', 'T5', 'T6'])
+  // T4（NTFS ADS）在没有真流通道的文件系统上不可测，按能力剔除
+  const expect = ADS ? ['T1', 'T2', 'T3', 'T4', 'T5', 'T6'] : ['T1', 'T2', 'T3', 'T5', 'T6']
+  assert.deepEqual([...h.hits].sort(), expect)
   assert.equal(h.falsePositives.size, 0, '加固视角不应把诱饵当真迹')
 }
 
@@ -91,7 +102,7 @@ function stripCanaries(dir) {
     const p = join(dir, DIRS.naive, t.name)
     const scrub = (s) => String(s).replace(/CANARY-[A-Z0-9-]+/g, 'REDACTED')
     writeFileSync(p, Buffer.from(scrub(readFileSync(p, 'utf8')), 'utf8'))
-    if (t.ads) {
+    if (t.ads && ADS) {
       // 注意：Windows 上重写主文件会把 ADS 带走，所以这里按 spec 重建备用数据流
       const sp = p + ':' + t.ads.stream
       writeFileSync(sp, Buffer.from(scrub(t.ads.body), 'utf8'))
@@ -104,7 +115,8 @@ function stripCanaries(dir) {
 export function testDetectionSurvivesCanaryStripping() {
   const dir = stripCanaries(STRIPPED)
   const h = hardenedScan(dir)
-  assert.deepEqual([...h.hits].sort(), ['T1', 'T2', 'T3', 'T4', 'T5', 'T6'], '抹掉 canary 后仍须 6/6（说明判定靠信号不靠答案）')
+  const expect = ADS ? ['T1', 'T2', 'T3', 'T4', 'T5', 'T6'] : ['T1', 'T2', 'T3', 'T5', 'T6']
+  assert.deepEqual([...h.hits].sort(), expect, '抹掉 canary 后仍须靠信号命中（与 ADS 能力无关的那几条）')
   for (const f of h.findings) {
     if (f.id === 'T6') continue
     assert.notEqual(f.corroborated, true, 'canary 已抹掉，不应再有印证')
@@ -116,10 +128,13 @@ export function testDetectionSurvivesCanaryStripping() {
 export function testEvaluateVerdictClosesBlindSpots() {
   const r = evaluate({ dir: fixture() })
   assert.equal(r.ok, true)
-  assert.deepEqual(r.verdict.naiveBlindSpots, ['T4', 'T6'])
+  // 不可测的手法（此处是 T4）从两边的盲区账里都摘出去 —— 只在可测集合上算收敛率
+  assert.deepEqual(r.verdict.naiveBlindSpots, ADS ? ['T4', 'T6'] : ['T6'])
   assert.deepEqual(r.verdict.hardenedBlindSpots, [])
   assert.equal(r.verdict.blindSpotReduction, 1)
   assert.equal(r.verdict.fpDelta, 4)
+  // 不可测手法的记账必须是显式的：支持 ADS 时为空，不支持时恰好是 T4
+  assert.deepEqual(r.verdict.untestable, ADS ? [] : ['T4'])
 }
 
 export function testAgentReportScoringFreeText() {

@@ -16,7 +16,7 @@ export function parseFlag(cmdline, flag) {
 }
 
 /** 由命令行列表归纳出可读结论（纯函数，便于测试） */
-export function summarizeLs(cmds, divertPort) {
+export function summarizeLs(cmds, divertPort, { idePatched = true } = {}) {
   const entries = cmds.map((c) => {
     const endpoint = parseFlag(c, '--cloud_code_endpoint')
     return {
@@ -26,21 +26,36 @@ export function summarizeLs(cmds, divertPort) {
     }
   })
   const via = entries.filter((e) => e.viaDivert).length
+  const offMsg = idePatched ? '（未指向 divert —— L4 补丁可能已被覆盖）' : '（直连官方，L4 未启用）'
   const summary = !entries.length ? 'down（没有 language_server 进程）'
-    : 'running ×' + entries.length + (via ? '，其中 ' + via + ' 个指向 divert' : '（未指向 divert —— L4 补丁可能已被覆盖）')
+    : 'running ×' + entries.length + (via ? '，其中 ' + via + ' 个指向 divert' : offMsg)
   return { count: entries.length, viaDivert: via, entries, summary }
 }
 
-/** 真探：查在跑的 language_server.exe。Windows-only（本项目即 Windows 工具链） */
-export function probeLanguageServers(divertPort) {
-  const ps = 'Get-CimInstance Win32_Process -Filter "Name=\'language_server.exe\'" | '
-    + 'ForEach-Object { $_.CommandLine }'
+/** 真探：查在跑的 language_server 进程。
+ *  v1.10.0：不再写死 .exe / PowerShell —— macOS 与 Linux 上没有 powershell，
+ *  进程名也不带后缀。旧实现在这两个平台上永远报 down，而 status 的
+ *  「L4 补丁被覆盖」告警也就永远不会触发（假绿）。 */
+export function probeLanguageServers(divertPort, opts = {}) {
   let out = ''
-  try {
-    const r = spawnSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8', timeout: 25000 })
-    out = r.stdout || ''
-  } catch { /* 探测失败按「不可知」处理，不伪装成 down */ }
+  let ok = false
+  if (process.platform === 'win32') {
+    const ps = 'Get-CimInstance Win32_Process -Filter "Name=\'language_server.exe\'" | '
+      + 'ForEach-Object { $_.CommandLine }'
+    try {
+      const r = spawnSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8', timeout: 25000 })
+      if (!r.error && r.status === 0) { ok = true; out = r.stdout || '' }
+    } catch { /* 探测失败按「不可知」处理，不伪装成 down */ }
+  } else {
+    try {
+      const r = spawnSync('ps', ['-axo', 'command'], { encoding: 'utf8', timeout: 15000 })
+      if (!r.error && r.status === 0) {
+        ok = true
+        out = (r.stdout || '').split('\n').filter((l) => /language_server/.test(l) && !/probeLanguageServers|ps -axo/.test(l)).join('\n')
+      }
+    } catch { /* 忽略 */ }
+  }
+  if (!ok) return { count: 0, viaDivert: 0, entries: [], summary: '未探到（进程查询失败）' }
   const cmds = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
-  if (!cmds.length && !out.trim()) return { count: 0, viaDivert: 0, entries: [], summary: '未探到（进程查询失败）' }
-  return summarizeLs(cmds, divertPort)
+  return summarizeLs(cmds, divertPort, opts)
 }
